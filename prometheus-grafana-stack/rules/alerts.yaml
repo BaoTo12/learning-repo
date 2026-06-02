@@ -1,0 +1,16 @@
+
+groups:
+  - name: Alerts 
+    rules:
+      - alert: Is Node Exporter Down
+        expr: up{job="node-exporter"} == 0
+        for: 5m
+        labels: 
+          team: Team Alpha
+          severity: Critical
+        annotations: 
+          summary: "{{ $labels.instance }} is Down"
+          # {{ $labels.instance }}  a way to get the instance's labels
+          # the labels give you labels attached to the monitoring object
+          # value gives you the value evaluated from the "expr" above
+          description: "Team Alpha has to restart the server VALUE: {{ $value }}"

@@ -1,0 +1,60 @@
+# Alert Manager is the control center for routing, grouping, and notifying alerts coming from Prometheus.
+# The Yaml structure
+
+global: # this is where you define shared configs used by receivers
+  # global configs (timeouts, SMTP, Slack API URL, etc.)
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'alert@example.com'
+  slack_api_url: 'https://hooks.slack.com/services/...'
+route:
+  # root routing tree
+  receiver: 'default-receiver' # Root route If no child route matches → fallback here.
+  group_by: ['alertname', 'instance'] # 👉 Alerts with same labels are grouped together
+  # Timing control
+  group_wait: 30s # wait before sending first notification
+  group_interval: 5m # wait before sending new alerts in same group
+  repeat_interval: 1h  # resend if still firing
+  # Sub-routes (routing tree)
+  routes:
+    # ! LEGACY
+    - match: # this is equally matcher
+        severity: critical # 👉 IF alert.labels.severity == "critical" → send to this receiver
+      receiver: 'critical-team' 
+    - match_re: # regular expression matcher --> system =~ "Billing.*"
+        system:
+    # ! NEW
+    - matchers: # matcher belongs to a route
+receivers: # where alerts go
+  - name: 'default-receiver'
+    email_configs:
+      - to: 'team@example.com'
+
+  - name: 'critical-team'
+    slack_configs:
+      - channel: '#alerts-critical'
+        text: "{{ .CommonAnnotations.summary }}" 
+
+# Silence - tắt cảnh báo tạm thời - A Silence is a straightforward, manual way to mute alerts for a specific window of time.
+# Inhibition is a rule-based, automated mechanism that suppresses a set of alerts (the "target") if another set of alerts (the "source") is already firing.
+inhibit_rules: # alert suppression
+  # rules to silence alerts based on other alerts
+  - source_match: # This defines the "Parent" alert.
+      severity: critical
+    target_match: # This defines the "Child" alerts. These are the alerts that will be suppressed (muted) if the source is active.
+      severity: warning
+    equal: ['instance']
+templates: # (optional)
+  # Used to define reusable message formats.
+
+
+# Prometheus fires alert
+#         ↓
+# Alertmanager receives it
+#         ↓
+# Route tree decides WHERE it goes
+#         ↓
+# Grouping reduces noise
+#         ↓
+# Inhibit rules suppress duplicates
+#         ↓
+# Receiver sends notification

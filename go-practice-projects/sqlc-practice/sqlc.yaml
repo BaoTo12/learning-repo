@@ -1,0 +1,10 @@
+version: "2"  # ! Version config syntax của sqlc
+sql:
+  - engine: "postgresql"
+    queries: "query.sql" # ! File chứa SQL queries.
+    schema: "schema.sql" # ! File schema database.
+    gen: # ? Phần config generate code.
+      go:
+        package: "tutorial" # ? Tên package Go generated.
+        out: "tutorial" # ? Folder output generated code.
+        sql_package: "pgx/v5" # ? Generated code sẽ dùng pgx driver

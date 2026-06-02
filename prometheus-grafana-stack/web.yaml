@@ -1,0 +1,4 @@
+basic_auth_users:
+  admin: $2a$12$M2p841Fl2y5Yh/HoNZAk2OsU6snGmdV1TiQjUiQcuujLicZGgDyRm # this is <username>: <password>
+
+  # pass this file while launch to prometheus 

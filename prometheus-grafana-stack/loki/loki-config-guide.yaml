@@ -1,0 +1,56 @@
+# ! THE BIG PICTURE
+# App (logs) --> log files --> Promtail (or Alloy) pushes -> Loki <- Grafana injests 
+
+# Loki yaml configuration file includes
+# 1. API server
+# 2. Storage Engine
+# 3. Indexing Strategy
+# 4. Limits
+# 5. Clustering
+
+
+# 🧩 Full structure (simplified overview)
+auth_enabled: false # 👉 Controls authentication
+
+# HTTP API (Grafana talks here)
+# gRPC (internal communication)
+# logging verbosity
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+common: # core system behavior
+  path_prefix: /loki # 👉 Base directory for all data
+  replication_factor: 1 # 👉 Number of copies of logs
+  ring: # 👉 This is cluster coordination system
+    kvstore:
+      store: inmemory # → single node only
+                      # → consul, etcd → distributed cluster
+
+  storage: # 👉 Defines where logs are stored
+  filesystem:
+    chunks_directory: /loki/chunks # chunks → actual logs
+    rules_directory: /loki/rules # index → metadata (labels)
+
+schema_config: # (how data is organized) 
+  configs:
+    - from: 2024-01-01 # 👉 When this schema becomes active
+      store: boltdb-shipper # 👉 Index storage method
+      object_store: filesystem # 👉 Where logs are stored: filesystem (local), S3 / GCS (production)
+      schema: v13
+      index: # 👉 How indexes are partitioned
+        prefix: index_
+        period: 24h
+storage_config: # 
+limits_config: # safety + control
+  retention_period: 24h # → logs auto-deleted after 1 day
+  allow_structured_metadata: true
+query_range: # performance optimization
+  query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+ruler: # alerting for logs
+  alertmanager_url: http://alertmanager:9093
+

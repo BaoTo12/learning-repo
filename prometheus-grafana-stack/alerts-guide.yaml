@@ -1,0 +1,46 @@
+# To define rules in Prometheus
+# We specify 
+  # What to record
+  # what to alert on
+
+groups: # A collection of rules evaluated together
+  - name: <group_name>
+    interval: <evaluation_interval>   # optional
+    rules:
+      - <rule_1>
+      - <rule_2>
+
+# TODO: Types of Rules
+# * Recording Rule
+  - record: <new_metric_name>
+    expr: <promql_expression> # 👉 The PromQL query
+    labels: 
+      <key>: <value>
+# Example
+  - record: job:http_requests:rate5m  # 👉 This creates a new metric: job:http_requests:rate5m
+    expr: rate(http_requests_total[5m])
+
+# * Alerting Rule
+  - alert: <alert_name>
+    expr: <promql_expression> # 👉 The PromQL query
+    # expr == TRUE continuously for the entire `for` duration --> alert will be fired
+    # 🧠 Example timeline
+      # Assume:
+      #   evaluation interval = 30s
+      #   for: 2m
+      #   → needs ~4 consecutive TRUE evaluations
+    for: <duration>
+    labels:
+      severity: <level> # 👉 Metadata attached to alert
+    annotations:
+      summary: <short_text>
+      description: <long_text>
+# Example
+  - alert: HighErrorRate
+    expr: rate(errors_total[5m]) > 0.05
+    for: 2m # 👉 Condition must hold for a duration before firing
+    labels:
+      severity: critical # 👉 Metadata attached to alert -> labels = for machines (routing, grouping, logic)
+    annotations: # 👉 Human-readable info (used in Alertmanager, Slack, etc.)
+      summary: "High error rate detected"
+      description: "Error rate is above 5% for 2 minutes"

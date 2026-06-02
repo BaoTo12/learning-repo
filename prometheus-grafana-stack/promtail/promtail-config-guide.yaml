@@ -1,0 +1,44 @@
+# ! Promtail is: an agent that collects logs → adds labels → sends to Loki
+
+server: # → Promtail itself
+  http_listen_port: 9080
+
+# Promtail reads log file
+# Then crashes
+# Restart → should it reread from start?
+# 👉 NO → duplicate logs
+positions: #  → tracking progress
+  filename: /tmp/positions.yaml
+
+clients: # → where logs go
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s # → delay before sending
+    batchsize: 1048576 # → max payload size
+
+scrape_configs: # WHAT logs → HOW to read → WHAT labels to attach
+  - job_name: system
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs # These become Loki labels: {job="varlogs"}
+          __path__: /var/log/*.log # 👉 This is how Promtail finds files
+
+  - job_name: docker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: docker
+          __path__: /var/lib/docker/containers/*/*.log
+
+
+# {"level":"error","msg":"failed"}
+# 👉 Extract: level = error
+# 👉 Convert into label: {level="error"}
+pipeline_stages: # Transforms logs before sending
+  - json:
+      expressions:
+        level: level
+  - labels:
+      level:
