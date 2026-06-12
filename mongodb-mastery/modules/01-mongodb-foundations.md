@@ -143,16 +143,16 @@ Let's calculate the size of a document representing a user profile with 5 attrib
 
 *   **Option A Math**:
     *   Doc Length: 4 bytes
-    *   Field 1: $1\text{ (type)} + 26\text{ ('user_identification_number')} + 1\text{ (\x00)} + 4\text{ (string length)} + 11\text{ ('USER-998877')} + 1\text{ (\x00)} = 44$ bytes
-    *   Field 2: $1\text{ (type)} + 19\text{ ('account_status_type')} + 1\text{ (\x00)} + 4\text{ (string length)} + 6\text{ ('ACTIVE')} + 1\text{ (\x00)} = 32$ bytes
-    *   Field 3: $1\text{ (type)} + 21\text{ ('system_retry_attempts')} + 1\text{ (\x00)} + 4\text{ (Int32 value)} = 27$ bytes
+    *   Field 1: $1\text{ (type)} + 26\text{ ('user\_identification\_number')} + 1\text{ (}\backslash\text{x00)} + 4\text{ (string length)} + 11\text{ ('USER-998877')} + 1\text{ (}\backslash\text{x00)} = 44$ bytes
+    *   Field 2: $1\text{ (type)} + 19\text{ ('account\_status\_type')} + 1\text{ (}\backslash\text{x00)} + 4\text{ (string length)} + 6\text{ ('ACTIVE')} + 1\text{ (}\backslash\text{x00)} = 32$ bytes
+    *   Field 3: $1\text{ (type)} + 21\text{ ('system\_retry\_attempts')} + 1\text{ (}\backslash\text{x00)} + 4\text{ (Int32 value)} = 27$ bytes
     *   Terminator: 1 byte
     *   *Total Size*: $4 + 44 + 32 + 27 + 1 = 108$ bytes (plus BSON nesting wrappers, averaging 135 bytes).
 *   **Option B Math**:
     *   Doc Length: 4 bytes
-    *   Field 1: $1\text{ (type)} + 3\text{ ('uid')} + 1\text{ (\x00)} + 4\text{ (string length)} + 11\text{ ('USER-998877')} + 1\text{ (\x00)} = 21$ bytes
-    *   Field 2: $1\text{ (type)} + 6\text{ ('status')} + 1\text{ (\x00)} + 4\text{ (string length)} + 6\text{ ('ACTIVE')} + 1\text{ (\x00)} = 19$ bytes
-    *   Field 3: $1\text{ (type)} + 7\text{ ('retries')} + 1\text{ (\x00)} + 4\text{ (Int32 value)} = 13$ bytes
+    *   Field 1: $1\text{ (type)} + 3\text{ ('uid')} + 1\text{ (}\backslash\text{x00)} + 4\text{ (string length)} + 11\text{ ('USER-998877')} + 1\text{ (}\backslash\text{x00)} = 21$ bytes
+    *   Field 2: $1\text{ (type)} + 6\text{ ('status')} + 1\text{ (}\backslash\text{x00)} + 4\text{ (string length)} + 6\text{ ('ACTIVE')} + 1\text{ (}\backslash\text{x00)} = 19$ bytes
+    *   Field 3: $1\text{ (type)} + 7\text{ ('retries')} + 1\text{ (}\backslash\text{x00)} + 4\text{ (Int32 value)} = 13$ bytes
     *   Terminator: 1 byte
     *   *Total Size*: $4 + 21 + 19 + 13 + 1 = 58$ bytes (averaging 67 bytes).
 *   **Scale Analysis**: Saving 68 bytes per document. For 100 million documents, this saves **6.8 GB of RAM and index space**.
