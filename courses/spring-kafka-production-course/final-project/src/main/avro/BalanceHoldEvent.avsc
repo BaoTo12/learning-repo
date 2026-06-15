@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "BalanceHoldEvent",
+  "namespace": "com.springkafka.course.avro",
+  "doc": "Schema representing account balance hold locks",
+  "fields": [
+    { "name": "transferId", "type": "string" },
+    { "name": "accountId", "type": "string" },
+    { "name": "amount", "type": "double" },
+    { "name": "status", "type": "string", "doc": "Status values: HELD, RELEASED, FAILED" }
+  ]
+}

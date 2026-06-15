@@ -1,0 +1,13 @@
+{
+  "type": "record",
+  "name": "TransferEvent",
+  "namespace": "com.springkafka.course.avro",
+  "doc": "Schema representing money transfer request outbox records",
+  "fields": [
+    { "name": "transferId", "type": "string", "doc": "Unique transfer identifier" },
+    { "name": "senderId", "type": "string", "doc": "Account ID of the sender" },
+    { "name": "receiverId", "type": "string", "doc": "Account ID of the receiver" },
+    { "name": "amount", "type": "double", "doc": "Transfer amount in USD" },
+    { "name": "status", "type": "string", "doc": "Initial status (PENDING, APPROVED, FAILED)" }
+  ]
+}

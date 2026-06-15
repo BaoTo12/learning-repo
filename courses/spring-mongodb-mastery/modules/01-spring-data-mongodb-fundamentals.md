@@ -1,197 +1,28 @@
 # Module 01: Spring Data MongoDB Fundamentals
 
-This module establishes the core structural foundation of Spring Data MongoDB, exploring mapping abstractions, lifecycle events, custom type conversions, auditing, and Spring's internal serialization mechanisms.
+Welcome class. Today we analyze the core configuration architectures of **Spring Data MongoDB (CS-530)**.
+
+When building enterprise applications on top of a document database, you must map Java domain objects (POJOs) to BSON documents. Today we study object conversion, Spring Data mapping annotations, custom type converters, auditing, and class metadata optimizations.
 
 ---
 
-## 1. What Problem It Solves
+## 1. Academic Lecture: Object Serialization & Auditing
 
-When building Java applications on top of a document-oriented database like MongoDB, developers encounter the impedance mismatch between the Java object model and MongoDB's BSON (Binary JSON) format. 
+### Basic Level: Object Mapping Abstraction
+When saving a Java object (like a `Customer` class instance) to MongoDB, you do not write raw database commands. Instead, Spring Data MongoDB intercepts your call, serializes your Java object into a BSON document, and sends it to the database. This process is called Object-Document Mapping (ODM).
 
-Spring Data MongoDB solves this problem by providing:
-1. **Unified Mapping Context**: Maps Java classes directly to BSON documents using declarative metadata annotations (`@Document`, `@Id`, `@Field`).
-2. **Standardized Query Abstractions**: Offers both declarative high-level access (`MongoRepository`, `ReactiveMongoRepository`) and low-level template operations (`MongoTemplate`, `ReactiveMongoTemplate`).
-3. **Automatic Auditing**: Auto-injects creation and modification metadata (`@CreatedDate`, `@LastModifiedDate`, `@CreatedBy`, `@LastModifiedBy`).
-4. **Flexible Converter Engine**: Plugs custom type converters directly into the BSON serialization pipeline, ensuring complex Java structures are cleanly persisted.
-5. **Polymorphic Type Mapping**: Manages class inheritance trees seamlessly through metadata tagging (`_class`).
+### Intermediate Level: Mapping Annotations & Custom Converters
+We configure mappings using declarative Spring Data annotations:
+*   `@Document(collection = "customers")`: Marks the class as a persistent database collection record.
+*   `@Id`: Specifies the primary key field. Can map to standard Strings or ObjectIds.
+*   `@Field("first_name")`: Maps a Java variable to a custom BSON key on disk.
+*   **Custom Converters**: Spring Data MongoDB doesn't store native Java `ZonedDateTime` timezone information (BSON dates are only UTC milliseconds). We write custom writing (`Converter<ZonedDateTime, Document>`) and reading (`Converter<Document, ZonedDateTime>`) converters to store timezone metadata in the database.
+*   **Auditing**: Annotations like `@CreatedDate` and `@LastModifiedDate` auto-populate timestamps during document conversion events.
 
----
-
-## 2. Why MongoDB Instead of Relational Databases (RDBMS)
-
-Relational database mapping frameworks (like Hibernate/JPA) map objects to a rigid tabular structure of rows, columns, and foreign keys. This requires complex join operations, schema migrations, and object-relational mapping (ORM) setups.
-
-MongoDB is chosen for specific high-scale and unstructured use cases because:
-* **Flexible/Dynamic Schema**: Document schemas are self-describing. Different documents within the same collection can have varying structures, which is ideal for catalogs, logs, and polymorphic domain structures.
-* **Hierarchical/Embedded Data Structures**: Instead of joining multiple tables (e.g., `Order`, `OrderItems`, `ShippingAddress`), MongoDB represents the entire domain aggregate as a single, nested BSON document. This guarantees single-document atomic writes and localized reads without overhead from joins.
-* **Horizontal Scalability**: MongoDB was built from the ground up to scale horizontally via sharding, distributing data across partitions without complex application-side routing.
-
----
-
-## 3. Trade-offs and Limitations
-
-| Architectural Attribute | Relational (JPA / RDBMS) | Spring Data MongoDB |
-| :--- | :--- | :--- |
-| **Object Relationships** | Strictly enforced foreign keys and constraints. Joins are first-class citizens. | Handled via embedding (denormalization) or loose references. Database-level joins (`$lookup`) exist but are costly. |
-| **Transaction Boundaries** | Multi-table transactions are the standard default. High locking overhead. | Single-document writes are atomic by default. Multi-document transactions require a Replica Set and carry throughput penalties. |
-| **Storage Efficiency** | Normalized tables reduce duplication; low storage footprint. | BSON duplicates keys in every document, and Spring Data adds `_class` metadata. High storage footprint. |
-| **Write Latency** | Higher due to ACID checks, locking, and index maintenance across multiple tables. | Extremely low when using single-document atomic updates and tunable write concerns. |
-
----
-
-## 4. Common Mistakes & Anti-patterns
-
-### Overusing DBRefs
-Developers migrating from Hibernate often map relationships using `@DBRef`. A `@DBRef` tells Spring Data to fetch another document in a separate network call or use a lazy proxy. 
-* *Why it's bad*: This leads to the classic $N+1$ select query problem, defeating MongoDB's localized read benefits.
-* *Production Fix*: Denormalize child structures directly inside the parent document, or use manual `$id` fields (ObjectId) and perform application-side batch loading or aggregation pipelines.
-
-### Relying on Lifecycle Events for Business Logic
-Spring Data MongoDB provides lifecycle interceptors like `BeforeSaveCallback` and `AfterSaveCallback`. 
-* *Why it's bad*: These events run within the main persistence thread. Blocking operations inside them (like calling external APIs or other databases) will crash application throughput.
-* *Production Fix*: Keep lifecycle callbacks strictly focused on data formatting or lightweight auditing. Move complex business logic to service layers or publish domain events asynchronously.
-
-### Ignoring the `_class` Field Storage Overhead
-By default, Spring Data MongoDB persists the fully qualified class name of the entity in a field called `_class` to handle polymorphic conversion.
-* *Why it's bad*: For millions of small documents, storing `"company.project.module.model.User"` in every document wastes megabytes of RAM and disk space, and increases indexing size.
-* *Production Fix*: Override the default type mapper to use aliases or remove the field entirely if polymorphism is not required.
-
----
-
-## 5. When NOT to Use MongoDB
-
-* **Strict Normalized Relational Schemes**: If your core business requires complex, ad-hoc, multi-entity joins that change frequently, RDBMS is superior.
-* **Deep Dynamic Graph Models**: When your data involves highly interconnected entities (like social graphs or pathfinding), a dedicated Graph Database (like Neo4j) is more appropriate.
-* **Append-Only Analytical Workloads**: For processing terabytes of immutable events with raw column aggregation, Columnar/OLAP databases (like ClickHouse or Snowflake) outperform MongoDB.
-
----
-
-## 6. Spring Boot & Spring Data Implementation
-
-### Core Dependencies (`pom.xml`)
-```xml
-<dependencies>
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-data-mongodb</artifactId>
-    </dependency>
-    <dependency>
-        <groupId>org.springframework.boot</groupId>
-        <artifactId>spring-boot-starter-validation</artifactId>
-    </dependency>
-</dependencies>
-```
-
-### Application Configuration (`application.yml`)
-```yaml
-spring:
-  data:
-    mongodb:
-      uri: mongodb://localhost:27017,localhost:27018,localhost:27019/retail_db?replicaSet=rs0
-      # Configure connection pool settings for high throughput
-      option:
-        min-connection-per-host: 10
-        max-connection-per-host: 100
-        connect-timeout: 5000
-        socket-timeout: 10000
-```
-
-### Domain Document Mapping
-```java
-package com.masterclass.mongodb.domain;
-
-import org.springframework.data.annotation.Id;
-import org.springframework.data.annotation.CreatedDate;
-import org.springframework.data.annotation.LastModifiedDate;
-import org.springframework.data.annotation.Version;
-import org.springframework.data.mongodb.core.index.CompoundIndex;
-import org.springframework.data.mongodb.core.index.Indexed;
-import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.core.mapping.Field;
-import org.springframework.data.mongodb.core.mapping.FieldType;
-
-import java.time.Instant;
-import java.util.List;
-
-@Document(collection = "customers")
-@CompoundIndex(name = "idx_status_email", def = "{'status': 1, 'email': 1}", unique = true)
-public class Customer {
-
-    @Id
-    private String id;
-
-    @Field("first_name")
-    private String firstName;
-
-    @Field("last_name")
-    private String lastName;
-
-    @Indexed(unique = true)
-    private String email;
-
-    @Field("status")
-    private String status;
-
-    @Field("metadata")
-    private List<Attribute> attributes;
-
-    @CreatedDate
-    @Field("created_at")
-    private Instant createdAt;
-
-    @LastModifiedDate
-    @Field("updated_at")
-    private Instant updatedAt;
-
-    @Version
-    private Long version;
-
-    // Getters, Setters, Constructors
-    public String getId() { return id; }
-    public void setId(String id) { this.id = id; }
-    public String getFirstName() { return firstName; }
-    public void setFirstName(String firstName) { this.firstName = firstName; }
-    public String getLastName() { return lastName; }
-    public void setLastName(String lastName) { this.lastName = lastName; }
-    public String getEmail() { return email; }
-    public void setEmail(String email) { this.email = email; }
-    public String getStatus() { return status; }
-    public void setStatus(String status) { this.status = status; }
-    public List<Attribute> getAttributes() { return attributes; }
-    public void setAttributes(List<Attribute> attributes) { this.attributes = attributes; }
-    public Instant getCreatedAt() { return createdAt; }
-    public Instant getUpdatedAt() { return updatedAt; }
-    public Long getVersion() { return version; }
-}
-```
-
-```java
-package com.masterclass.mongodb.domain;
-
-import org.springframework.data.mongodb.core.mapping.Field;
-
-public class Attribute {
-    @Field("key")
-    private String key;
-    @Field("val")
-    private String value;
-
-    public Attribute() {}
-    public Attribute(String key, String value) {
-        this.key = key;
-        this.value = value;
-    }
-    public String getKey() { return key; }
-    public String getValue() { return value; }
-}
-```
-
----
-
-## 7. Production Architecture Examples
-
-### 1. Architectural Flow of Spring Data MongoDB Internals
-The diagram below shows how operations move from the Repository/Template abstractions down to MongoDB's wire protocol via the `MappingMongoConverter` and the BSON drivers:
+### Advanced Level: `MappingMongoConverter` Context & `_class` Field Optimization
+*   **The Converter Engine**: Under the hood, Spring Data uses the `MappingMongoConverter` class. During startup, it scans target entities and populates the `MappingContext` metadata cache. During persistence operations, it executes registered custom converters, transforms POJOs to BSON `Document` maps, and hands them to the MongoDB Java Driver.
+*   **The `_class` Overhead**: By default, Spring Data appends a `_class` field containing the fully qualified class name to every BSON document (e.g. `"com.masterclass.mongodb.domain.Customer"`). This allows Spring to resolve class inheritance during reads. In collections holding millions of documents, this metadata wastes gigabytes of RAM cache and disk space.
+*   **Aliasing & Disabling**: We can optimize storage by overriding the default type mapper in our config to use short aliases (`@TypeAlias("cust")`) or disabling the `_class` field entirely if polymorphism is not required.
 
 ```mermaid
 graph TD
@@ -200,32 +31,63 @@ graph TD
     B -->|Generates Query| C
     C -->|Invokes Mapping Engine| D[MappingMongoConverter]
     D -->|Look up Type Mapping Context| E[MappingContext]
-    D -->|Executes Custom Converters| F[Custom Conversers Provider]
+    D -->|Executes Custom Converters| F[Custom Converters Provider]
     D -->|Transforms POJO to Document| G[BSON org.bson.Document]
     G --> H[MongoDB Java Driver]
     H -->|Wire Protocol| I[(MongoDB Replica Set)]
 ```
 
-### 2. High-Performance Configuration mapping (`_class` optimization)
-To remove the `_class` field or map custom types natively, write a custom `MongoDatabaseFactory` and `MappingMongoConverter` configuration:
+---
+
+## 2. Theory vs. Production Trade-offs
+
+Compare data mapping options:
+
+| Mapping Configuration | Storage Overhead | Polymorphic Reads Support | Query Latency | Implementation Complexity |
+| :--- | :--- | :--- | :--- | :--- |
+| **Default `_class` Tracking** | High (Stores full package class path) | Fully Supported (Subclasses resolved automatically) | Low | Low (Default configuration) |
+| **Class Aliases (`@TypeAlias`)** | Low (Stores short string value) | Fully Supported | Low | Moderate |
+| **Disabled Type Mapping** | Zero (No `_class` metadata) | Not Supported (Casts all reads to base class) | Low | High (Requires custom mapping beans) |
+
+---
+
+## 3. How to Use: Configuring Custom Converters in Spring
+
+Let us configure Spring Data. We contrast a default, un-optimized config (saving class metadata) with a hardened configuration that registers custom converters and disables the `_class` field.
+
+### A. The Default Un-optimized Configuration (Anti-Pattern)
+Avoid leaving default settings active in high-scale collections:
 
 ```java
-package com.masterclass.mongodb.config;
+// DANGER: Storing the default class path in every document wastes storage:
+// { "_id": "1", "name": "Alice", "_class": "com.masterclass.mongodb.domain.Customer" }
+@Configuration
+public class DefaultMongoConfig {
+    // No custom converters or type mapping optimizations defined
+}
+```
 
-import com.masterclass.mongodb.converter.ZonedDateTimeWriteConverter;
-import com.masterclass.mongodb.converter.ZonedDateTimeReadConverter;
+### B. The Production-Grade Custom Converter Configuration (Production Pattern)
+Create custom converters and override the default type mapping settings inside a configuration bean:
+
+```java
+import org.bson.Document;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.convert.ReadingConverter;
+import org.springframework.data.convert.WritingConverter;
+import org.springframework.core.convert.converter.Converter;
 import org.springframework.data.mongodb.config.EnableMongoAuditing;
-import org.springframework.data.mongodb.core.convert.DbRefResolver;
 import org.springframework.data.mongodb.core.convert.DefaultDbRefResolver;
 import org.springframework.data.mongodb.core.convert.DefaultMongoTypeMapper;
 import org.springframework.data.mongodb.core.convert.MappingMongoConverter;
 import org.springframework.data.mongodb.core.convert.MongoCustomConversions;
 import org.springframework.data.mongodb.core.mapping.MongoMappingContext;
 import org.springframework.data.mongodb.MongoDatabaseFactory;
-
-import java.util.Arrays;
+import java.time.ZonedDateTime;
+import java.time.ZoneId;
+import java.util.Date;
+import java.util.List;
 
 @Configuration
 @EnableMongoAuditing
@@ -239,277 +101,146 @@ public class MongoConfig {
 
     @Bean
     public MongoCustomConversions customConversions() {
-        return new MongoCustomConversions(Arrays.asList(
+        return new MongoCustomConversions(List.of(
             new ZonedDateTimeWriteConverter(),
             new ZonedDateTimeReadConverter()
         ));
     }
 
     @Bean
-    public MappingMongoConverter mappingMongoConverter(MongoMappingContext context, 
-                                                       MongoCustomConversions conversions) {
-        DbRefResolver dbRefResolver = new DefaultDbRefResolver(mongoDbFactory);
-        MappingMongoConverter converter = new MappingMongoConverter(dbRefResolver, context);
+    public MappingMongoConverter mappingMongoConverter(MongoMappingContext context, MongoCustomConversions conversions) {
+        var resolver = new DefaultDbRefResolver(mongoDbFactory);
+        var converter = new MappingMongoConverter(resolver, context);
         converter.setCustomConversions(conversions);
         
-        // Remove the "_class" field entirely to optimize storage
+        // Remove "_class" metadata from documents to optimize storage
         converter.setTypeMapper(new DefaultMongoTypeMapper(null));
-        
         return converter;
     }
-}
-```
-
-### 3. Custom Converters Implementation
-MongoDB doesn't store native Java `ZonedDateTime` timezone information—it only stores UTC timestamps. These converters store `ZonedDateTime` as a compound document holding both the Instant date and the Zone string.
-
-```java
-package com.masterclass.mongodb.converter;
-
-import org.bson.Document;
-import org.springframework.core.convert.converter.Converter;
-import org.springframework.data.convert.WritingConverter;
-import java.time.ZonedDateTime;
-import java.util.Date;
-
-@WritingConverter
-public class ZonedDateTimeWriteConverter implements Converter<ZonedDateTime, Document> {
-    @Override
-    public Document convert(ZonedDateTime source) {
-        Document document = new Document();
-        document.put("date", Date.from(source.toInstant()));
-        document.put("zone", source.getZone().getId());
-        return document;
-    }
-}
-```
-
-```java
-package com.masterclass.mongodb.converter;
-
-import org.bson.Document;
-import org.springframework.core.convert.converter.Converter;
-import org.springframework.data.convert.ReadingConverter;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
-import java.util.Date;
-
-@ReadingConverter
-public class ZonedDateTimeReadConverter implements Converter<Document, ZonedDateTime> {
-    @Override
-    public ZonedDateTime convert(Document source) {
-        Date date = source.getDate("date");
-        String zone = source.getString("zone");
-        return ZonedDateTime.ofInstant(date.toInstant(), ZoneId.of(zone));
-    }
-}
-```
-
----
-
-## 8. Interview-Level Questions
-
-### Q1: Explain how `MappingMongoConverter` resolves object mappings under the hood. How does it track relationships?
-**Answer**: `MappingMongoConverter` relies on the `MappingContext` metadata (populated scanning annotations like `@Document`, `@Id`, and `@Field`). When converting a POJO to BSON:
-1. It registers the POJO with the metadata context.
-2. It processes fields recursively: primitive types are mapped to BSON structures directly; nested POJOs are mapped as nested BSON documents.
-3. If it encounters a `@DBRef` annotated field, it initiates a proxy or lazy resolver (`DbRefResolver`), which points to a reference container in the target collection. Manual references (storing raw ObjectIds) do not trigger relationships and must be fetched via application code or `$lookup` stages.
-
-### Q2: What is the risk of keeping the default `_class` field in high-frequency production write paths? How do you disable it, and what features do you lose?
-**Answer**: 
-* **Risk**: High disk/RAM usage overhead. A fully qualified class name can consume up to 60+ bytes per document. In a collection containing 100 million documents, this wastes 6GB+ of storage, bloated indexes, and memory cache space.
-* **Disabling**: Provide a custom `MappingMongoConverter` Bean configured with `DefaultMongoTypeMapper(null)`.
-* **Lost Features**: You lose the ability to query polymorphically. If you have an abstract class `Vehicle` with subclasses `Car` and `Bike` stored in the same collection, disabling `_class` prevents Spring from auto-instantiating the correct subclass upon retrieval.
-
-### Q3: How does Spring Data MongoDB Auditing work under the hood? Does it use database-side triggers?
-**Answer**: No, Spring Data Auditing is purely application-side. It listens to Spring Application context lifecycle events (specifically matching `BeforeConvertCallback`). When Spring converts a Java object into a BSON document, the interceptor checks for the presence of `@CreatedDate`, `@LastModifiedDate`, `@CreatedBy`, and `@LastModifiedBy`. It then injects the current timestamp (or retrieves the auditor from a registered `AuditorAware` bean) into the entity properties before serialization.
-
----
-
-## 9. Hands-on Exercises
-
-### Exercise 1: Inspecting the BSON payload
-1. Spin up the MongoDB environment using the Docker Compose file in the root `README.md`.
-2. Bootstrap a simple Spring Boot app with the `Customer` document mapped above.
-3. Save a customer object.
-4. Open the MongoDB shell (`mongosh`) and query:
-   ```javascript
-   use retail_db;
-   db.customers.find().pretty();
-   ```
-5. Observe the presence of `_class` in the document structure. Note its storage size compared to the actual domain fields.
-
-### Exercise 2: Implementing Class-level Aliases
-Instead of removing `_class` entirely, map subclass aliases to maintain polymorphism without the storage overhead:
-1. Annotate a class with `@TypeAlias("cust_alias")` or configure it programmatically.
-2. Verify in `mongosh` that the value of `_class` has changed from the package class path to `"cust_alias"`.
-
----
-
-## 10. Mini-Project: Audit Log Converter Service
-
-### Scenario
-You are building an append-only Audit Log system for a payment processing gateway. The system must record financial transactions. The transaction currency must be stored as a custom Java `Money` value object containing an amount (BigDecimal) and currency (String). However, because MongoDB BSON lacks decimal-preserving precision outside high-spec formats, you must write a custom converter that serializes the `Money` object into a flat BSON string representation like `USD:150.50` and deserializes it back. Additionally, auditing metadata must record the system operator executing the change.
-
-### Step 1: Implement the Domain Objects & Converter
-```java
-package com.masterclass.mongodb.miniproject.model;
-
-import java.math.BigDecimal;
-
-public class Money {
-    private final BigDecimal amount;
-    private final String currency;
-
-    public Money(BigDecimal amount, String currency) {
-        this.amount = amount;
-        this.currency = currency;
-    }
-
-    public BigDecimal getAmount() { return amount; }
-    public String getCurrency() { return currency; }
-
-    @Override
-    public String toString() {
-        return currency + ":" + amount.toPlainString();
-    }
-}
-```
-
-```java
-package com.masterclass.mongodb.miniproject.converter;
-
-import com.masterclass.mongodb.miniproject.model.Money;
-import org.springframework.core.convert.converter.Converter;
-import org.springframework.data.convert.ReadingConverter;
-import org.springframework.data.convert.WritingConverter;
-import java.math.BigDecimal;
-
-public class MoneyConverters {
 
     @WritingConverter
-    public static class MoneyWriteConverter implements Converter<Money, String> {
+    public static class ZonedDateTimeWriteConverter implements Converter<ZonedDateTime, Document> {
         @Override
-        public String convert(Money source) {
-            return source.toString();
+        public Document convert(ZonedDateTime source) {
+            return new Document()
+                    .append("date", Date.from(source.toInstant()))
+                    .append("zone", source.getZone().getId());
         }
     }
 
     @ReadingConverter
-    public static class MoneyReadConverter implements Converter<String, Money> {
+    public static class ZonedDateTimeReadConverter implements Converter<Document, ZonedDateTime> {
         @Override
-        public Money convert(String source) {
-            if (source == null || !source.contains(":")) {
-                return null;
-            }
-            String[] parts = source.split(":");
-            return new Money(new BigDecimal(parts[1]), parts[0]);
+        public ZonedDateTime convert(Document source) {
+            Date date = source.getDate("date");
+            String zone = source.getString("zone");
+            return ZonedDateTime.ofInstant(date.toInstant(), ZoneId.of(zone));
         }
     }
 }
 ```
 
-### Step 2: Implement Audit Document with Auditing Annotations
+### Line-by-Line Code Explanation:
+1.  `@EnableMongoAuditing`: Enables Spring Data's auditing lifecycle interceptors.
+2.  `MongoCustomConversions(...)`: Registers the custom converters with the Spring converter registry.
+3.  `converter.setTypeMapper(new DefaultMongoTypeMapper(null))`: Overrides the default type mapper, telling the converter engine to omit the `_class` field during serialization.
+4.  `ZonedDateTimeWriteConverter`: Extracts the UTC date instant and timezone string, storing them inside a nested document.
+
+---
+
+## 4. Common Errors & Pitfalls
+
+### Pitfall 1: Non-Blocking Context Violations in Auditing
+*   **Why it fails**: When using Reactive Spring Data, auditing requires fetching the user context asynchronously (e.g. from reactive Spring Security). If you implement auditing using blocking operations (like querying a database on the main thread), you block the Netty event loop, crashing application throughput.
+*   **Mitigation**: Use `ReactiveAuditorAware` to retrieve the current auditor asynchronously via Reactor `Mono` publishers.
+
+---
+
+## 5. Socratic Review Questions
+
+### Question 1
+Why does Spring Data MongoDB require custom converter classes to handle timezone-aware date objects?
+
+#### Answer
+The standard BSON date specification maps dates to UTC Unix milliseconds since the epoch, which does not store timezone offsets. If you insert a Java `ZonedDateTime` directly, the driver discards the timezone metadata and stores only the UTC time. When read back, the timezone defaults to the server's local zone. Writing custom converters to store dates as nested documents (holding the timestamp and the timezone ID) preserves the timezone offset.
+
+---
+
+## 6. Hands-on Challenge: Custom Document Converter
+
+### The Challenge
+In this challenge, you will implement a custom Spring Data Converter to handle a value object.
+Your task:
+1. Complete `MoneyWriteConverter` and `MoneyReadConverter` classes.
+2. `Money` is a value object holding `amount` (BigDecimal) and `currency` (String).
+3. The write converter must serialize `Money` to a string formatted as `"currency:amount"` (e.g., `"USD:19.99"`).
+4. The read converter must parse the database string back into a `Money` instance.
+
+Complete the implementation stub:
+
 ```java
-package com.masterclass.mongodb.miniproject.model;
+package com.masterclass.mongodb.miniproject.converter;
 
-import org.springframework.data.annotation.CreatedBy;
-import org.springframework.data.annotation.CreatedDate;
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.core.mapping.Field;
-import java.time.Instant;
+import org.springframework.core.convert.converter.Converter;
+import java.math.BigDecimal;
 
-@Document(collection = "transaction_logs")
-public class TransactionLog {
+public class MoneyConverters {
 
-    @Id
-    private String id;
-
-    @Field("action")
-    private String action;
-
-    @Field("value")
-    private Money transactionValue;
-
-    @CreatedDate
-    @Field("created_at")
-    private Instant createdAt;
-
-    @CreatedBy
-    @Field("operator")
-    private String operator;
-
-    public TransactionLog() {}
-
-    public TransactionLog(String action, Money transactionValue) {
-        this.action = action;
-        this.transactionValue = transactionValue;
+    public static class Money {
+        private final BigDecimal amount;
+        private final String currency;
+        
+        public Money(BigDecimal amount, String currency) {
+            this.amount = amount;
+            this.currency = currency;
+        }
+        public BigDecimal getAmount() { return amount; }
+        public String getCurrency() { return currency; }
     }
 
-    public String getId() { return id; }
-    public String getAction() { return action; }
-    public Money getTransactionValue() { return transactionValue; }
-    public Instant getCreatedAt() { return createdAt; }
-    public String getOperator() { return operator; }
-}
-```
-
-### Step 3: Implement Auditor Resolver
-```java
-package com.masterclass.mongodb.miniproject.config;
-
-import org.springframework.data.domain.AuditorAware;
-import org.springframework.stereotype.Component;
-import java.util.Optional;
-
-@Component
-public class SecurityAuditorAware implements AuditorAware<String> {
-    @Override
-    public Optional<String> resolveCurrentAuditor() {
-        // In real production, pull from Spring Security context
-        // SecurityContextHolder.getContext().getAuthentication().getName()
-        return Optional.of("SYSTEM_SCHEDULER_SVC");
+    public static class MoneyWriteConverter implements Converter<Money, String> {
+        @Override
+        public String convert(Money source) {
+            // TODO: Serialize to currency:amount
+            return null;
+        }
     }
-}
-```
 
-### Step 4: Register Custom Config
-```java
-package com.masterclass.mongodb.miniproject.config;
-
-import com.masterclass.mongodb.miniproject.converter.MoneyConverters;
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.data.mongodb.config.EnableMongoAuditing;
-import org.springframework.data.mongodb.core.convert.MongoCustomConversions;
-import java.util.Arrays;
-
-@Configuration
-@EnableMongoAuditing
-public class MiniProjectMongoConfig {
-
-    @Bean
-    public MongoCustomConversions customConversions() {
-        return new MongoCustomConversions(Arrays.asList(
-            new MoneyConverters.MoneyWriteConverter(),
-            new MoneyConverters.MoneyReadConverter()
-        ));
+    public static class MoneyReadConverter implements Converter<String, Money> {
+        @Override
+        public Money convert(String source) {
+            // TODO: Parse back to Money object
+            return null;
+        }
     }
 }
 ```
 
-### Step 5: Test Execution Verification
+### Verification Test
+Verify your code with this JUnit 5 test class:
+
 ```java
-package com.masterclass.mongodb.miniproject.repository;
+package com.masterclass.mongodb.miniproject.converter;
 
-import com.masterclass.mongodb.miniproject.model.Money;
-import com.masterclass.mongodb.miniproject.model.TransactionLog;
-import org.springframework.data.mongodb.repository.MongoRepository;
-import org.springframework.stereotype.Repository;
+import org.junit.jupiter.api.Test;
+import java.math.BigDecimal;
+import static org.junit.jupiter.api.Assertions.*;
 
-@Repository
-public interface TransactionLogRepository extends MongoRepository<TransactionLog, String> {
+class MoneyConvertersTest {
+
+    @Test
+    void testWriteAndReadConverters() {
+        var money = new MoneyConverters.Money(new BigDecimal("99.95"), "USD");
+        var writer = new MoneyConverters.MoneyWriteConverter();
+        var reader = new MoneyConverters.MoneyReadConverter();
+
+        String serialized = writer.convert(money);
+        assertEquals("USD:99.95", serialized);
+
+        var deserialized = reader.convert(serialized);
+        assertNotNull(deserialized);
+        assertEquals(new BigDecimal("99.95"), deserialized.getAmount());
+        assertEquals("USD", deserialized.getCurrency());
+    }
 }
 ```
-If you invoke `repository.save(new TransactionLog("DEPOSIT", new Money(new BigDecimal("1500.00"), "USD")))`, Spring will automatically convert the nested value class to `value: "USD:1500.00"` inside MongoDB, inject `created_at` matching the current Instant, and assign `operator` as `"SYSTEM_SCHEDULER_SVC"`.

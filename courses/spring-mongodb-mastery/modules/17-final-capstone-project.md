@@ -1,346 +1,194 @@
 # Module 17: Final Capstone Project
 
-This document specifies the requirements, architecture, and deployment configurations for the final capstone project.
+Welcome class. Today we assemble our learnings in the **Spring Data MongoDB Final Capstone Project (CS-530)**.
+
+To build a production-grade application, we integrate multiple components: repositories, dynamic configurations, transactions, observability metrics, and validation. Today we outline the system architecture, code templates, and automated tests.
 
 ---
 
-## 1. Project Goal
+## 1. Academic Lecture: System Integration Blueprint
 
-You will build a production-grade **High-Scale Distributed Ride-Hailing & Payment Platform** using Spring Boot and Spring Data MongoDB. The application must handle ride bookings, atomic payments, driver tracking, real-time analytics, and event propagation. 
+### Basic Level: Capstone Overview
+The Capstone project integrates the core concepts learned throughout this course into a single Spring Boot application. 
+We will build a high-performance **Hotel Booking & Inventory Management API** that processes real-time room reservations, manages inventory, publishes booking events to a transactional outbox collection, and generates metrics.
 
-The project must integrate **Redis caching, Apache Kafka messaging, Spring Security, Testcontainers, and Prometheus/Grafana monitoring**, following the production patterns established throughout this course.
+### Intermediate Level: Application Architecture
+The application uses a layered architecture:
+1.  **API Layer**: Spring Web controllers exposed to clients.
+2.  **Service Layer**: Business logic, transactional boundaries, and dynamic multi-tenancy validation.
+3.  **Repository Layer**: Spring Data repositories mapping models to MongoDB collections.
+
+### Advanced Level: Infrastructure Integration
+Our project integrates several advanced infrastructure components:
+*   **Database Clustering**: Multi-node replica set configuration ensuring durability.
+*   **Event Pipelines**: Change stream listeners that tail an outbox collection and publish events to Apache Kafka.
+*   **Telemetry**: Prometheus dashboard tracking active connections, transaction latencies, and slow query executions.
+*   **Validation**: Schema verification using JSR-380 validation listeners.
 
 ```mermaid
 graph TD
-    subgraph Spring Boot Microservice
-        A[REST Controller] -->|Route requests| B[Ride Service]
-        B -->|Check Cache| C[(Redis Cache)]
-        B -->|Transactional updates| D[(MongoDB Replica Set)]
-        D -->|CDC Change Stream| E[Kafka Outbox Publisher]
-    end
-    
-    subgraph Event Broker
-        E -->|Publish Event| F[Kafka Cluster]
-    end
-    
-    subgraph Observability
-        G[Prometheus Scraper] -->|Poll metrics| A
-        H[Grafana Dashboard] -->|Visualize charts| G
-    end
+    Client[Web Client] --> API[Spring Controllers]
+    API --> Service[Transaction Services]
+    Service --> Repo[MongoRepositories]
+    Service --> Outbox[Outbox Collection]
+    Outbox -->|Change Stream event| Listener[Event Listener Loop]
+    Listener -->|At-Least-Once Delivery| Kafka[Apache Kafka]
+    Repo --> DB[(MongoDB Replica Set)]
+    DB -->|Metrics data| Prom[Prometheus Endpoint]
 ```
 
 ---
 
-## 2. Platform Requirements
+## 2. Theory vs. Production Trade-offs
 
-### Phase 1: Document Modeling & Index Design
-Implement the MongoDB document models using Spring Data annotations. You must design optimized compound indexes using the **ESR Rule**, multikey indexes for arrays, and TTL indexes for session expiry.
-* **Driver Profile**: Stores driver details, active vehicle status, and a list of historical ratings.
-* **Ride Booking**: Tracks pickup and drop-off coordinates (using GeoJSON `Point`), fares, and ride status (`"REQUESTED"`, `"ACTIVE"`, `"COMPLETED"`).
-* **Outbox Event**: Stores outgoing events to be sent to Kafka.
-
-### Phase 2: Transactional Integrity (ACID)
-Implement a checkout process that executes the following operations atomically inside a single MongoDB transaction:
-1. Deduct the fare amount from the passenger's account balance.
-2. Credit the fare amount to the driver's earnings.
-3. Save the invoice document.
-4. Write a `"PAYMENT_COMPLETED"` event to the Outbox collection.
-* *Failures* (such as insufficient passenger balance or non-existent accounts) must roll back all operations, leaving the database unchanged.
-
-### Phase 3: High-Performance Analytics Aggregation
-Implement a reporting pipeline that aggregates completed rides to calculate:
-* Total fares generated.
-* Average ride distance.
-* Average ratings grouped by driver.
-* Filter results by date range using indexes, and optimize memory footprint.
-
-### Phase 4: Cache-Aside Pattern with Redis
-To protect MongoDB from heavy read traffic:
-* Cache driver profiles in Redis.
-* Read requests must check the cache first. On a cache miss, load the profile from MongoDB and write it to Redis with a 5-minute TTL.
-* Writes or updates to driver profiles must invalidate the corresponding Redis cache key.
-
-### Phase 5: Event-Driven CDC Integration
-Implement an Outbox Event Publisher. 
-* Use MongoDB Change Streams to monitor writes to the `outbox` collection.
-* Retrieve new event documents and publish them to Kafka.
-* Once Kafka acknowledges receipt, delete or update the outbox document in MongoDB to prevent double delivery.
-
-### Phase 6: Production Observability & Micrometer Metrics
-Integrate Actuator and Micrometer to expose connection pool and command metrics:
-* Monitor `waitQueueSize`, checkouts, and query latency.
-* Expose these metrics in Prometheus format at `/actuator/prometheus`.
+| Project Stage | Design Decision | Optimization Focus | Implementation Impact |
+| :--- | :--- | :--- | :--- |
+| **Data Mapping** | Disable `_class` metadata | Disk/RAM Storage optimization | Shortens entity payload sizes on disk. |
+| **Transactions** | Use `@Transactional` | Atomicity & ACID consistency | WiredTiger lock timeouts configured at 5s. |
+| **Event Routing** | Transactional Outbox | Message delivery reliability | Prevents dual-write failures. |
 
 ---
 
-## 3. Local Infrastructure Stack (`docker-compose.yml`)
+## 3. How to Use: Implementing Capstone Code Blocks
 
-Create this file in your project root to spin up the local replica set, Redis cache, Kafka broker, and monitoring tools:
+Here is the setup for the core domain model and repository.
 
-```yaml
-version: '3.8'
-
-services:
-  # MongoDB Nodes
-  mongo1:
-    image: mongo:6.0
-    container_name: mongo1
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo1_data:/data/db
-    networks:
-      - platform-network
-
-  mongo2:
-    image: mongo:6.0
-    container_name: mongo2
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
-    ports:
-      - "27018:27018"
-    volumes:
-      - mongo2_data:/data/db
-    networks:
-      - platform-network
-
-  mongo3:
-    image: mongo:6.0
-    container_name: mongo3
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27019"]
-    ports:
-      - "27019:27019"
-    volumes:
-      - mongo3_data:/data/db
-    networks:
-      - platform-network
-
-  mongo-init:
-    image: mongo:6.0
-    container_name: mongo-init
-    depends_on:
-      - mongo1
-      - mongo2
-      - mongo3
-    networks:
-      - platform-network
-    entrypoint: [ "bash", "-c", "sleep 5 && mongosh --host mongo1:27017 --eval 'rs.initiate({_id: \"rs0\", members: [{_id: 0, host: \"mongo1:27017\", priority: 2}, {_id: 1, host: \"mongo2:27018\", priority: 1}, {_id: 2, host: \"mongo3:27019\", priority: 1}]})'" ]
-
-  # Redis Cache
-  redis:
-    image: redis:7.0-alpine
-    container_name: redis_cache
-    ports:
-      - "6379:6379"
-    networks:
-      - platform-network
-
-  # Kafka + KRaft
-  kafka:
-    image: confluentinc/cp-kafka:7.3.0
-    container_name: kafka_broker
-    ports:
-      - "9092:9092"
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_LATEST_BINSTACKS: 'true'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
-      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
-      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
-      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
-    networks:
-      - platform-network
-
-  # Prometheus
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-    ports:
-      - "9090:9090"
-    networks:
-      - platform-network
-
-  # Grafana
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    ports:
-      - "3000:3000"
-    networks:
-      - platform-network
-
-volumes:
-  mongo1_data:
-  mongo2_data:
-  mongo3_data:
-
-networks:
-  platform-network:
-    driver: bridge
-```
-
----
-
-## 4. Prometheus Configuration (`prometheus.yml`)
-
-Configure Prometheus to scrape metrics from the Spring Boot application context endpoint:
-
-```yaml
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: 'spring-boot-app'
-    metrics_path: '/actuator/prometheus'
-    static_configs:
-      - targets: ['host.docker.internal:8080'] # Points to Spring Boot app port
-```
-
----
-
-## 5. Core Spring Code Templates
-
-### 1. Spring Security & Least-Privilege RBAC Context
-Configure Spring Security to authorize API requests:
-
+### Domain Object: Capstone Booking
 ```java
-package com.masterclass.mongodb.capstone.config;
+package com.masterclass.mongodb.domain;
 
-import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
-import org.springframework.security.core.userdetails.User;
-import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UserDetailsService;
-import org.springframework.security.provisioning.InMemoryUserDetailsManager;
-import org.springframework.security.web.SecurityFilterChain;
-
-@Configuration
-@EnableWebSecurity
-public class WebSecurityConfig {
-
-    @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
-        http
-            .csrf(csrf -> csrf.disable()) // Disable for REST testing
-            .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/actuator/**").permitAll() // Public metrics access
-                .requestMatchers("/admin/**").hasRole("ADMIN") // Admin diagnostics
-                .requestMatchers("/booking/**").hasAnyRole("CUSTOMER", "ADMIN")
-                .anyRequest().authenticated()
-            )
-            .httpBasic(httpBasic -> {}); // Basic Auth authentication path
-
-        return http.build();
-    }
-
-    @Bean
-    public UserDetailsService userDetailsService() {
-        UserDetails customer = User.withDefaultPasswordEncoder()
-                .username("passenger")
-                .password("bookingPass")
-                .roles("CUSTOMER")
-                .build();
-
-        UserDetails admin = User.withDefaultPasswordEncoder()
-                .username("ops_admin")
-                .password("adminSecret")
-                .roles("ADMIN")
-                .build();
-
-        return new InMemoryUserDetailsManager(customer, admin);
-    }
-}
-```
-
-### 2. Transactional Checkout Payment Service
-```java
-package com.masterclass.mongodb.capstone.service;
-
-import org.bson.Document;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.data.mongodb.core.query.Update;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-import java.math.BigDecimal;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Version;
+import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.mapping.Field;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
 import java.time.Instant;
 
-@Service
-public class PaymentCheckoutService {
+@Document(collection = "capstone_bookings")
+public class CapstoneBooking {
 
-    private final MongoTemplate mongoTemplate;
+    @Id
+    private String id;
 
-    public PaymentCheckoutService(MongoTemplate mongoTemplate) {
-        this.mongoTemplate = mongoTemplate;
+    @NotBlank(message = "Room ID is mandatory")
+    @Field("room_id")
+    private String roomId;
+
+    @NotBlank(message = "User ID is mandatory")
+    @Field("user_id")
+    private String userId;
+
+    @Min(value = 1, message = "Duration must be at least 1 day")
+    private int durationDays;
+
+    @Field("booking_time")
+    private Instant bookingTime;
+
+    @Version
+    private Long version;
+
+    public CapstoneBooking() {}
+    public CapstoneBooking(String id, String roomId, String userId, int durationDays, Instant bookingTime) {
+        this.id = id;
+        this.roomId = roomId;
+        this.userId = userId;
+        this.durationDays = durationDays;
+        this.bookingTime = bookingTime;
     }
 
-    /**
-     * Executes atomic billing transactions across multiple collections.
-     */
-    @Transactional
-    public void executePaymentTransaction(String rideId, String passengerId, String driverId, BigDecimal fare) {
-        // Step 1: Deduct balance from passenger account
-        Query passengerQuery = new Query(
-                Criteria.where("_id").is(passengerId)
-                        .and("balance").gte(fare)
-        );
-        Update deductBalance = new Update().inc("balance", fare.negate());
-        var res1 = mongoTemplate.updateFirst(passengerQuery, deductBalance, "passenger_accounts");
+    public String getId() { return id; }
+    public String getRoomId() { return roomId; }
+    public String getUserId() { return userId; }
+    public int getDurationDays() { return durationDays; }
+    public Instant getBookingTime() { return bookingTime; }
+    public Long getVersion() { return version; }
+}
+```
 
-        if (res1.getModifiedCount() == 0) {
-            throw new IllegalStateException("Insufficient balance or missing account: " + passengerId);
-        }
+### Core Repository Interface
+```java
+package com.masterclass.mongodb.repository;
 
-        // Step 2: Credit balance to driver account
-        Query driverQuery = new Query(Criteria.where("_id").is(driverId));
-        Update creditEarnings = new Update().inc("earnings", fare);
-        var res2 = mongoTemplate.updateFirst(driverQuery, creditEarnings, "driver_accounts");
+import com.masterclass.mongodb.domain.CapstoneBooking;
+import org.springframework.data.mongodb.repository.MongoRepository;
+import org.springframework.stereotype.Repository;
+import java.util.List;
 
-        if (res2.getMatchedCount() == 0) {
-            throw new IllegalArgumentException("Driver account " + driverId + " does not exist");
-        }
-
-        // Step 3: Write Invoice document
-        Document invoice = new Document()
-                .append("ride_id", rideId)
-                .append("amount", fare)
-                .append("timestamp", Instant.now());
-        mongoTemplate.save(invoice, "invoices");
-
-        // Step 4: Write Outbox Event for Kafka propagation
-        Document outboxEvent = new Document()
-                .append("aggregate_id", rideId)
-                .append("event_type", "RIDE_COMPLETED")
-                .append("payload", String.format("{\"rideId\":\"%s\",\"fare\":%s}", rideId, fare.toString()))
-                .append("status", "PENDING")
-                .append("created_at", Instant.now());
-        mongoTemplate.save(outboxEvent, "outbox_events");
-    }
+@Repository
+public interface CapstoneBookingRepository extends MongoRepository<CapstoneBooking, String> {
+    List<CapstoneBooking> findByUserId(String userId);
 }
 ```
 
 ---
 
-## 6. Project Verification & Assessment Checklist
+## 4. Common Errors & Pitfalls
 
-To complete the project, you must write a verification report that shows your system is fully functional:
+### Pitfall 1: Missing Index Definitions on Production Startup
+*   **Why it fails**: When `auto-index-creation` is disabled in production, queries running against unindexed collection fields (e.g., looking up bookings by `userId`) default to slow collection scans (`COLLSCAN`), degrading performance under load.
+*   **Mitigation**: Include index creation scripts in database migration plans (e.g., using Mongock) to ensure indexes are built before launching application updates.
 
-- [ ] **Docker Compose Verification**: Run `docker compose up -d` and verify that all containers (MongoDB replica set, Redis, Kafka, Prometheus, and Grafana) start successfully.
-- [ ] **NoSQL Injection Check**: Write a test verifying that raw input containing NoSQL operators (such as `{"$ne": ""}`) is rejected or parsed as a literal string.
-- [ ] **Transaction Rollback Test**: Write a Testcontainers integration test asserting that when a checkout fails (due to insufficient balance), no balance is deducted and no invoice is created.
-- [ ] **Index Profiler Stats**: Run an explain plan on your ride-booking query and verify it uses a compound index (`IXSCAN`) and does not perform a collection scan (`COLLSCAN`).
-- [ ] **Prometheus Metrics Hook**: Access `http://localhost:8080/actuator/prometheus` and verify that the MongoDB connection pool metrics (`mongodb.driver.connection...`) are exposed.
+---
+
+## 5. Socratic Review Questions
+
+### Question 1
+Explain why the Capstone project combines JSR-380 validation, `@Version` checking, and transactional outbox logs into a single workflow.
+
+#### Answer
+This workflow protects database consistency and event delivery:
+1. JSR-380 validation prevents malformed payloads from entering database queries.
+2. `@Version` checks prevent concurrent write conflicts and double-booking.
+3. Transactional outbox logs ensure that real-time events are captured and published to Apache Kafka without risk of dual-write failures.
+
+---
+
+## 6. Hands-on Challenge: Final Integration Validation
+
+### The Challenge
+In this challenge, you will implement a validation helper class that checks if a CapstoneBooking entity contains valid booking dates.
+Your task:
+1. Complete `CapstoneValidator.java`.
+2. Verify if the booking date is set in the future.
+
+Complete the implementation stub:
+
+```java
+package com.masterclass.mongodb.challenge;
+
+import com.masterclass.mongodb.domain.CapstoneBooking;
+import java.time.Instant;
+
+public class CapstoneValidator {
+
+    public static boolean isFutureBooking(CapstoneBooking booking) {
+        // TODO: Return true if the booking's bookingTime is in the future
+        return booking != null && booking.getBookingTime() != null && booking.getBookingTime().isAfter(Instant.now());
+    }
+}
+```
+
+### Verification Test
+Verify your code with this JUnit 5 test class:
+
+```java
+package com.masterclass.mongodb.challenge;
+
+import com.masterclass.mongodb.domain.CapstoneBooking;
+import org.junit.jupiter.api.Test;
+import java.time.Instant;
+import static org.junit.jupiter.api.Assertions.*;
+
+class CapstoneValidatorTest {
+
+    @Test
+    void testIsFutureBooking() {
+        var futureBooking = new CapstoneBooking("1", "R-101", "U-001", 3, Instant.now().plusSeconds(3600));
+        var pastBooking = new CapstoneBooking("2", "R-101", "U-001", 3, Instant.now().minusSeconds(3600));
+
+        assertTrue(CapstoneValidator.isFutureBooking(futureBooking));
+        assertFalse(CapstoneValidator.isFutureBooking(pastBooking));
+    }
+}
+```

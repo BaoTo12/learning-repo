@@ -1,519 +1,228 @@
 # Module 12: Security
 
-This module covers database security in MongoDB. It explores client-side encryption, authentication, transport layer security (TLS/SSL), NoSQL injection risks, and strategies to secure dynamic queries in Spring Boot.
+Welcome class. Today we analyze security configurations and client-side encryption using **Spring Data MongoDB Security (CS-530)**.
+
+To protect sensitive information, databases must implement authentication, authorization, secure transport, and field-level encryption. Today we study role-based access control, SSL/TLS, and Client-Side Field-Level Encryption (CSFLE).
 
 ---
 
-## 1. What Problem It Solves
+## 1. Academic Lecture: Security & Field-Level Encryption
 
-If a database configuration is compromised, malicious actors can steal sensitive data, modify records, or execute arbitrary command injection attacks. In cloud deployments, protecting sensitive information (such as credit card numbers and personal identification details) requires securing data at rest, in transit, and in memory.
+### Basic Level: Database Security Basics
+Securing a database requires:
+1.  **Transport Security (TLS/SSL)**: Encrypting traffic between applications and the database.
+2.  **Authentication**: Verifying client identities (using username/password or certificate-based auth).
+3.  **Role-Based Access Control (RBAC)**: Granting specific permissions to users (e.g., read-only access to specific databases).
 
-MongoDB security patterns solve these problems by:
-* **Securing Data in Transit**: Enforces TLS/SSL encryption to prevent network sniffing and man-in-the-middle attacks.
-* **Protecting Data in Memory (CSFLE)**: Encrypts sensitive fields at the application client layer before sending data over the network, ensuring the database server never sees the plaintext.
-* **Enforcing Least Privilege Access**: Configures Role-Based Access Control (RBAC) to restrict user access to specific collections and commands.
-* **Preventing NoSQL Injection**: Sanitizes query inputs to prevent users from injecting BSON operators that bypass authentication checks.
+### Intermediate Level: SSL/TLS Configurations
+We configure secure transport parameters in Spring Boot using the application properties or a MongoClient bean:
+*   Enabling SSL/TLS configurations: `ssl=true`.
+*   Truststore mapping: Configuring truststore paths to allow JVM processes to trust self-signed database certificates.
 
----
+### Advanced Level: Client-Side Field-Level Encryption (CSFLE)
+*   **What is CSFLE?**: Standard database encryption encrypts data on disk (encryption-at-rest). However, database administrators can still read plain-text values in memory. CSFLE encrypts sensitive fields *on the client* before sending the BSON payload over the network.
+*   **Key Vaults & Keys**: CSFLE uses a Key Vault collection (usually in a separate database) storing Data Encryption Keys (DEKs). These DEKs are wrapped using a master Key Encryption Key (KEK) hosted on a Key Management Service (KMS) like AWS KMS, Azure Key Vault, Google Cloud KMS, or a local file key.
+*   **CSFLE Encryption Flow**:
+    1.  The client requests a write.
+    2.  The driver fetches the Data Encryption Key (DEK) from the Key Vault.
+    3.  If not in cache, the driver decrypts the DEK using the KMS provider's master key (KEK).
+    4.  The driver encrypts the field value locally using the decrypted DEK.
+    5.  The encrypted BSON payload is sent to MongoDB.
 
-## 2. Why MongoDB Instead of Relational Databases (RDBMS)
-
-Relational databases support Column-Level Encryption, but this is usually managed on the database server.
-
-MongoDB's security model offers unique advantages:
-* **Client-Side Field-Level Encryption (CSFLE)**: Unlike relational column encryption (which decrypts data on the database server), CSFLE encrypts data on the client. Even if an attacker gains root access to the database host, they cannot read the encrypted fields because the decryption keys are stored in a separate Key Management Service (KMS) like AWS KMS.
-* **JSON-Based Access Control**: MongoDB supports granular role-based access control, allowing administrators to restrict access down to specific document fields or query conditions using standard JSON filters.
-
----
-
-## 3. Trade-offs and Limitations
-
-### CSFLE Query Limits
-Because fields are encrypted on the client before being sent to the database, MongoDB cannot read the plaintext values.
-* Consequently, you cannot perform range queries (`$gt`, `$lt`), text searches, or regex matches on CSFLE-encrypted fields.
-* You can only perform exact match queries (`$eq`) on fields encrypted using **Deterministic Encryption**. Fields encrypted using **Randomized Encryption** cannot be queried at all.
-
-### Performance Overhead
-Encrypting and decrypting fields on the client increases CPU utilization in the application JVM. Additionally, managing encryption keys requires network round-trips to KMS providers, adding latency to write paths.
-
----
-
-## 4. Common Mistakes & Anti-patterns
-
-### NoSQL Injection via Unsanitized JSON Query Strings
-Constructing queries using raw JSON string concatenation with unsanitized user inputs.
-* *Why it's bad*: If a login query concatenates user input like `"{ 'username': '" + user + "', 'password': '" + pass + "' }"`, an attacker can pass `{"$ne": ""}` as the password parameter. The query will evaluate to `password: { $ne: "" }`, returning the first user in the collection and bypassing authentication.
-* *Production Fix*: Always use Spring Data's `Criteria` and `Query` builders, which automatically escape parameters, or use query placeholders (`?0`) in `@Query` annotations.
-
-```java
-// ANTI-PATTERN: Vulnerable to NoSQL Injection
-String rawJson = "{ 'username': '" + userInput + "' }";
-BasicQuery query = new BasicQuery(rawJson); // Vulnerable!
-
-// PRODUCTION FIX: Automatically Sanitized
-Query query = new Query(Criteria.where("username").is(userInput));
+```mermaid
+sequenceDiagram
+    participant App as Spring App
+    participant Drv as Mongo Driver
+    participant KMS as KMS Provider (AWS/GCP)
+    participant DB as MongoDB Instance
+    App->>Drv: Save User { ssn: "123-45" }
+    Drv->>DB: Fetch DEK from KeyVault
+    DB-->>Drv: Encrypted DEK
+    Drv->>KMS: Decrypt DEK using KEK
+    KMS-->>Drv: Plaintext DEK
+    Drv->>Drv: Encrypt "123-45" to BSON Binary
+    Drv->>DB: Save User { ssn: BinaryData }
 ```
 
-### Storing Connection Strings in Plaintext Source Code
-Hardcoding connection strings containing database passwords (`mongodb://admin:secretPass@localhost...`) inside `application.yml` or committing them to Git.
-* *Why it's bad*: Exposes database credentials to anyone with access to the source code repository.
-* *Production Fix*: Use environment variables (`${MONGO_PASSWORD}`) and manage credentials using a secrets manager (such as HashiCorp Vault or AWS Secrets Manager).
+---
+
+## 2. Theory vs. Production Trade-offs
+
+| Encryption Type | Execution Location | DB Admin Visibility | Performance Impact | Setup Complexity |
+| :--- | :--- | :--- | :--- | :--- |
+| **None** | None | Fully Visible | Zero | Low |
+| **Encryption at Rest** | DB Storage Engine | Visible in memory | Low | Moderate |
+| **CSFLE (Client-Side)** | Application Driver | Binary cipher text | Moderate-High (Client CPU) | High |
 
 ---
 
-## 5. When NOT to Use Client-Side Encryption
+## 3. How to Use: Configuring SSL and Client-Side Field-Level Encryption
 
-* **Range-Query Heavy Fields**: If a field needs to be queried using range filters, sorting, or wildcards (e.g. searching users by birthdate range), do not use CSFLE. Use database-level **Encryption at Rest** (like WiredTiger encryption) combined with TLS in-transit encryption instead.
+Below we show an un-encrypted configuration (anti-pattern) followed by a production-ready Client-Side Field-Level Encryption config.
 
----
+### A. Unencrypted Configuration (Anti-Pattern)
+*Avoid storing sensitive data (SSN, credit cards) in plain text:*
 
-## 6. Spring Boot & Spring Data Implementation
-
-This project implements a secure configuration featuring TLS/SSL communication, NoSQL injection prevention, and manual field encryption.
-
-### Domain Object: Secure Customer Account
-```java
-package com.masterclass.mongodb.domain;
-
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.index.Indexed;
-import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.core.mapping.Field;
-
-@Document(collection = "secure_customers")
-public class SecureCustomer {
-
-    @Id
-    private String id;
-
-    @Indexed(unique = true)
-    private String email;
-
-    @Field("ssn_encrypted")
-    private String encryptedSsn; // Stored as cipher text encrypted by the application
-
-    private double balance;
-
-    public SecureCustomer() {}
-
-    public SecureCustomer(String id, String email, String encryptedSsn, double balance) {
-        this.id = id;
-        this.email = email;
-        this.encryptedSsn = encryptedSsn;
-        this.balance = balance;
-    }
-
-    public String getId() { return id; }
-    public String getEmail() { return email; }
-    public String getEncryptedSsn() { return encryptedSsn; }
-    public void setEncryptedSsn(String encryptedSsn) { this.encryptedSsn = encryptedSsn; }
-    public double getBalance() { return balance; }
-}
+```yaml
+# DANGER: Plaintext data can be read by database administrators,
+# compromised read replicas, or during memory dumps.
+spring:
+  data:
+    mongodb:
+      uri: mongodb://admin:secret@localhost:27017/finance
 ```
 
-### Programmatic TLS / SSL Mongo Configuration
-This configuration loads SSL certificates and configures the connection pool to use TLS to encrypt data in transit.
+### B. CSFLE Secure Client Configuration (Production Pattern)
+Here is the client configuration utilizing KMS Local Key encryption for sensitive fields.
 
 ```java
 package com.masterclass.mongodb.config;
 
+import com.mongodb.ClientEncryptionSettings;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
-import org.springframework.beans.factory.annotation.Value;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.vault.ClientEncryption;
+import com.mongodb.client.vault.ClientEncryptions;
+import org.bson.BsonBinary;
+import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.mongodb.config.AbstractMongoClientConfiguration;
-import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManagerFactory;
-import java.security.KeyStore;
+import java.util.HashMap;
+import java.util.Map;
 
 @Configuration
-public class SecureMongoConfig extends AbstractMongoClientConfiguration {
+public class EncryptionMongoConfig {
 
-    @Value("${spring.data.mongodb.uri}")
-    private String mongoUri;
-
-    @Override
-    protected String getDatabaseName() {
-        return "secure_retail_db";
-    }
-
-    @Override
-    public MongoClientSettings mongoClientSettings() {
-        ConnectionString connectionString = new ConnectionString(mongoUri);
+    /**
+     * Configures the ClientEncryption manager using a local KMS provider key.
+     * In production, replace the local key with an AWS, Azure, or GCP KMS configuration.
+     */
+    @Bean
+    public ClientEncryption clientEncryption(MongoClient mongoClient) {
+        // 96-byte local master key representation
+        byte[] localMasterKey = new byte[96]; 
+        // In production, load this secure byte array from an environment variable or key vault
         
-        MongoClientSettings.builder()
-                .applyConnectionString(connectionString);
+        Map<String, Map<String, Object>> kmsProviders = new HashMap<>();
+        Map<String, Object> localKeyMap = new HashMap<>();
+        localKeyMap.put("key", localMasterKey);
+        kmsProviders.put("local", localKeyMap);
 
-        // Configure SSL context programmatically for self-signed TLS certificates
-        try {
-            SSLContext sslContext = SSLContext.getInstance("TLSv1.3");
-            
-            // In production, load the corporate certificate authority (CA) keystore
-            KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
-            trustStore.load(null, null); // Load empty or from file path
-            
-            TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            tmf.init(trustStore);
-            sslContext.init(null, tmf.getTrustManagers(), null);
+        ClientEncryptionSettings settings = ClientEncryptionSettings.builder()
+                .keyVaultMongoClientSettings(MongoClientSettings.builder()
+                        .applyConnectionString(new ConnectionString("mongodb://localhost:27017"))
+                        .build())
+                .keyVaultNamespace("encryption.__keyVault")
+                .kmsProviders(kmsProviders)
+                .build();
 
-            // Apply SSL settings to the MongoClient builder
-            return MongoClientSettings.builder()
-                    .applyConnectionString(connectionString)
-                    .applyToSslSettings(builder -> builder
-                            .enabled(true)
-                            .invalidHostNameAllowed(false) // Strict hostname validation
-                            .context(sslContext))
-                    .build();
-        } catch (Exception e) {
-            // Fallback configuration if custom TLS Context loading fails
-            return MongoClientSettings.builder()
-                    .applyConnectionString(connectionString)
-                    .applyToSslSettings(builder -> builder.enabled(true))
-                    .build();
-        }
+        return ClientEncryptions.create(settings);
     }
 }
 ```
-
-### Secure Query Implementation (NoSQL Injection Defense)
-This repository service validates inputs and uses parameters bindings to prevent NoSQL injection.
 
 ```java
 package com.masterclass.mongodb.service;
 
-import com.masterclass.mongodb.domain.SecureCustomer;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.query.Query;
+import com.mongodb.client.model.vault.EncryptOptions;
+import com.mongodb.client.vault.ClientEncryption;
+import org.bson.BsonBinary;
+import org.bson.BsonString;
 import org.springframework.stereotype.Service;
 
 @Service
-public class SecureCustomerService {
+public class SecureDataService {
 
-    private final MongoTemplate mongoTemplate;
+    private final ClientEncryption clientEncryption;
 
-    public SecureCustomerService(MongoTemplate mongoTemplate) {
-        this.mongoTemplate = mongoTemplate;
+    public SecureDataService(ClientEncryption clientEncryption) {
+        this.clientEncryption = clientEncryption;
     }
 
     /**
-     * Retrieves a customer profile securely.
-     * Uses the Criteria API to bind the input parameter, preventing NoSQL injection.
+     * Encrypts sensitive fields manually using Client-Side Field-Level Encryption.
+     * Uses a deterministic encryption algorithm to allow exact match searches.
+     *
+     * @param plainText The value to encrypt
+     * @param dataKeyId The UUID identifier of the data encryption key
      */
-    public SecureCustomer locateCustomerSecurely(String userInputEmail) {
-        // Enforce basic input validation checks
-        if (userInputEmail == null || userInputEmail.isBlank() || !userInputEmail.contains("@")) {
-            throw new IllegalArgumentException("Malformed search input email");
-        }
+    public BsonBinary encryptDeterministicField(String plainText, BsonBinary dataKeyId) {
+        EncryptOptions options = new EncryptOptions("AEAD_AES_256_CBC_HMAC_SHA256-Deterministic")
+                .keyId(dataKeyId);
 
-        // Spring Data automatically escapes and binds parameter types
-        Query query = new Query(Criteria.where("email").is(userInputEmail));
-        
-        return mongoTemplate.findOne(query, SecureCustomer.class);
+        return clientEncryption.encrypt(new BsonString(plainText), options);
     }
 }
 ```
+
+### Line-by-Line Code Explanation:
+1.  `ClientEncryptionSettings`: Configures the encryption driver, specifying where to store key vault data (`encryption.__keyVault`) and registering the KMS provider configuration.
+2.  `ClientEncryptions.create(...)`: Initializes the driver-level encryption loop.
+3.  `AEAD_AES_256_CBC_HMAC_SHA256-Deterministic`: Algorithm configuration. Deterministic encryption produces the same ciphertext for a given plaintext value, enabling indexing and exact-match queries. Randomized encryption (`AEAD_AES_256_CBC_HMAC_SHA256-Randomized`) prevents indexing but is more secure.
 
 ---
 
-## 7. Production Architecture Examples
+## 4. Common Errors & Pitfalls
 
-### 1. Client-Side Field-Level Encryption (CSFLE) Flow
-CSFLE encrypts sensitive fields on the client before they are sent over the network, ensuring the database server never sees the plaintext:
-
-```mermaid
-graph TD
-    subgraph Application Client JVM
-        A[PlainText SSN: 123-45-678] --> B[CSFLE Encryptor Engine]
-        B -->|Fetch Encryption Key| C[KMS Provider: AWS KMS]
-        C -->|Return Data Encryption Key| B
-        B -->|Encrypts Field| D[CipherText Binary: BSON Binary]
-    end
-    
-    subgraph Network Transit
-        D -->|Send encrypted write request| E[(MongoDB Database Node)]
-    end
-    
-    subgraph Database Storage
-        E -->|Writes to disk| F[Document: ssn_encrypted: Binary]
-        Note over F: Database engine cannot decrypt<br/>without access to KMS
-    end
-```
-
-### 2. NoSQL Operator Injection Mechanics
-How unsanitized JSON concatenation allows malicious queries to bypass authentication:
-
-```mermaid
-graph TD
-    A[Attacker Input: email: admin@shop.com, password: {"$ne": ""}] --> B[Unsanitized JSON Builder]
-    B -->|Generates Query| C["{ email: 'admin@shop.com', password: { '$ne': '' } }"]
-    C -->|Execute Query| D[(MongoDB Database)]
-    D -->|Evaluates password is not empty| E[Bypasses password check and returns Admin document]
-```
+### Pitfall 1: Querying Randomized Encrypted Fields
+*   **Why it fails**: If you encrypt a field (e.g., `ssn`) using a randomized algorithm, encrypting `"123-45"` produces different ciphertexts every time (e.g., `cipher_abc` then `cipher_xyz`). If you execute a query like `db.users.find({ ssn: "123-45" })`, the driver encrypts `"123-45"` at runtime. If it encrypts to `cipher_abc` but the document contains `cipher_xyz`, the query fails to find the record.
+*   **Mitigation**: Use deterministic encryption for fields that require exact-match querying. Use randomized encryption for fields that do not need to be queried (e.g., profile pictures, descriptions).
 
 ---
 
-## 8. Interview-Level Questions
+## 5. Socratic Review Questions
 
-### Q1: What is NoSQL Injection, and how does using Spring Data's `Criteria` API prevent it?
-**Answer**:
-* **NoSQL Injection**: Occurs when an application accepts unsanitized user input and uses it to construct database queries. In MongoDB, an attacker can inject BSON operators (like `$ne`, `$gt`, or `$where`) to bypass authentication checks or retrieve unauthorized records.
-* **Prevention**: Spring Data's `Criteria` API (e.g. `Criteria.where("field").is(userInput)`) automatically wraps user input in typed variables. The MongoDB driver escapes input strings and treats them as literal values rather than executable BSON commands, preventing injection attacks.
+### Question 1
+Explain the difference between deterministic and randomized encryption in Client-Side Field-Level Encryption (CSFLE). Which one supports index lookups?
 
-### Q2: Explain the differences between Deterministic and Randomized encryption in CSFLE.
-**Answer**:
-* **Deterministic Encryption**: Always produces the same ciphertext for a given plaintext value. This allows MongoDB to perform exact match queries (`$eq`) on encrypted fields. However, it is less secure because it is vulnerable to frequency analysis attacks.
-* **Randomized Encryption**: Produces a different ciphertext for the same plaintext value every time it is encrypted. This is more secure but prevents the database from performing any query filters on the encrypted field.
-
-### Q3: What is the purpose of the Key Vault Collection in a Client-Side Encryption setup?
-**Answer**:
-The **Key Vault Collection** is a collection in MongoDB (usually named `admin.datakeys`) that stores the **Data Encryption Keys (DEKs)** used to encrypt individual document fields.
-* The DEKs are encrypted using a **Master Key** managed by an external Key Management Service (KMS) like AWS KMS or HashiCorp Vault.
-* When the application client needs to encrypt or decrypt a field, it fetches the encrypted DEK from the Key Vault, decrypts it using the KMS Master Key, and uses the decrypted DEK to process the field value.
+#### Answer
+Deterministic encryption produces the same ciphertext value for a given plaintext value under the same key. This allows MongoDB to index the encrypted binary data and perform exact-match lookups. Randomized encryption produces different ciphertexts for the same plaintext value every time it is run, preventing index lookups but providing stronger security.
 
 ---
 
-## 9. Hands-on Exercises
+## 6. Hands-on Challenge: Encryption Helper Implementation
 
-### Exercise 1: Simulating and Mitigating NoSQL Injection
-1. Create a `users` collection containing a user with password `"secretPass"`.
-2. Write a vulnerable controller method that accepts a raw JSON string query and passes it to `BasicQuery`.
-3. Send a request to bypass the password check:
-   ```json
-   { "username": "admin", "password": { "$ne": "" } }
-   ```
-4. Verify that the query successfully bypasses authentication and returns the user document.
-5. Re-implement the query using the `Criteria` API and verify that the attack is mitigated.
+### The Challenge
+In this challenge, you will implement a utility method to check if a byte array is valid as a KMS key representation.
+Your task:
+1. Complete `KmsKeyValidator.java`.
+2. Verify if the provided key is not null and is exactly 96 bytes long (required for local KMS keys).
 
----
-
-## 10. Mini-Project: Encrypted Patient Records Portal
-
-### Scenario
-You are building the backend for a healthcare portal. 
-Patient records contain sensitive health identifiers: Social Security Numbers (SSN) and diagnosis logs. 
-To comply with regulatory standards:
-1. The SSN field must be client-side encrypted deterministically, allowing exact-match queries.
-2. The diagnosis logs must be client-side encrypted using randomized encryption, preventing queries.
-3. Access to the collection must use SSL/TLS connection paths, and credentials must be loaded from configuration properties.
-
-### Step 1: Implement the Local Key Management Encryption Service
-In production, you would configure an external KMS (like AWS KMS or Azure Key Vault). 
-For this project, we will implement a local key encryption utility that simulates CSFLE client-side encryption.
+Complete the implementation stub:
 
 ```java
-package com.masterclass.mongodb.miniproject.security;
+package com.masterclass.mongodb.challenge;
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.SecretKeySpec;
-import java.util.Base64;
+public class KmsKeyValidator {
 
-public class LocalEncryptionUtil {
-
-    private static final String ALGORITHM = "AES";
-    
-    // 16-byte key for local AES testing (in production, load from Key Vault / KMS)
-    private static final byte[] LOCAL_MASTER_KEY = "SECRET_MASTER_KY".getBytes();
-
-    /**
-     * Simulates client-side deterministic encryption.
-     */
-    public static String encryptDeterministic(String value) {
-        try {
-            SecretKeySpec keySpec = new SecretKeySpec(LOCAL_MASTER_KEY, ALGORITHM);
-            Cipher cipher = Cipher.getInstance(ALGORITHM);
-            cipher.init(Cipher.ENCRYPT_MODE, keySpec);
-            byte[] encryptedBytes = cipher.doFinal(value.getBytes());
-            return Base64.getEncoder().encodeToString(encryptedBytes);
-        } catch (Exception e) {
-            throw new RuntimeException("Encryption failed", e);
-        }
-    }
-
-    /**
-     * Simulates client-side decryption.
-     */
-    public static String decrypt(String encryptedValue) {
-        try {
-            SecretKeySpec keySpec = new SecretKeySpec(LOCAL_MASTER_KEY, ALGORITHM);
-            Cipher cipher = Cipher.getInstance(ALGORITHM);
-            cipher.init(Cipher.DECRYPT_MODE, keySpec);
-            byte[] decryptedBytes = cipher.doFinal(Base64.getDecoder().decode(encryptedValue));
-            return new String(decryptedBytes);
-        } catch (Exception e) {
-            throw new RuntimeException("Decryption failed", e);
-        }
+    public static boolean isValidLocalKmsKey(byte[] keyBytes) {
+        // TODO: Return true if the keyBytes array is not null and has a length of exactly 96 bytes
+        return keyBytes != null && keyBytes.length == 96;
     }
 }
 ```
 
-### Step 2: Implement the Patient Record Entity with Security Event Listeners
-We will use Spring Data Lifecycle events (`BeforeSaveCallback` and `AfterLoadCallback`) to automatically encrypt sensitive fields before saving them, and decrypt them when loaded.
+### Verification Test
+Verify your code with this JUnit 5 test class:
 
 ```java
-package com.masterclass.mongodb.miniproject.model;
+package com.masterclass.mongodb.challenge;
 
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.core.mapping.Field;
+import org.junit.jupiter.api.Test;
+import static org.junit.jupiter.api.Assertions.*;
 
-@Document(collection = "patient_records")
-public class PatientRecord {
+class KmsKeyValidatorTest {
 
-    @Id
-    private String id;
-    
-    private String name;
+    @Test
+    void testIsValidLocalKmsKey() {
+        byte[] valid = new byte[96];
+        byte[] invalidShort = new byte[64];
+        byte[] invalidNull = null;
 
-    @Field("ssn_encrypted")
-    private String ssn; // Encrypted on write, decrypted on read
-
-    @Field("diagnosis_encrypted")
-    private String diagnosis; // Encrypted on write, decrypted on read
-
-    public PatientRecord() {}
-
-    public PatientRecord(String id, String name, String ssn, String diagnosis) {
-        this.id = id;
-        this.name = name;
-        this.ssn = ssn;
-        this.diagnosis = diagnosis;
-    }
-
-    public String getId() { return id; }
-    public String getName() { return name; }
-    public String getSsn() { return ssn; }
-    public void setSsn(String ssn) { this.ssn = ssn; }
-    public String getDiagnosis() { return diagnosis; }
-    public void setDiagnosis(String diagnosis) { this.diagnosis = diagnosis; }
-}
-```
-
-```java
-package com.masterclass.mongodb.miniproject.listener;
-
-import com.masterclass.mongodb.miniproject.model.PatientRecord;
-import com.masterclass.mongodb.miniproject.security.LocalEncryptionUtil;
-import org.springframework.data.mongodb.core.mapping.event.AfterLoadCallback;
-import org.springframework.data.mongodb.core.mapping.event.BeforeSaveCallback;
-import org.springframework.stereotype.Component;
-import org.bson.Document;
-
-@Component
-public class PatientRecordSecurityListener 
-        implements BeforeSaveCallback<PatientRecord>, AfterLoadCallback<PatientRecord> {
-
-    @Override
-    public PatientRecord onBeforeSave(PatientRecord entity, Document document, String collection) {
-        // Encrypt sensitive fields on write
-        if (entity.getSsn() != null) {
-            document.put("ssn_encrypted", LocalEncryptionUtil.encryptDeterministic(entity.getSsn()));
-        }
-        if (entity.getDiagnosis() != null) {
-            document.put("diagnosis_encrypted", LocalEncryptionUtil.encryptDeterministic(entity.getDiagnosis()));
-        }
-        return entity;
-    }
-
-    @Override
-    public void onAfterLoad(PatientRecord entity, Document document, String collection) {
-        // Decrypt sensitive fields on read
-        if (entity.getSsn() != null) {
-            entity.setSsn(LocalEncryptionUtil.decrypt(entity.getSsn()));
-        }
-        if (entity.getDiagnosis() != null) {
-            entity.setDiagnosis(LocalEncryptionUtil.decrypt(entity.getDiagnosis()));
-        }
+        assertTrue(KmsKeyValidator.isValidLocalKmsKey(valid));
+        assertFalse(KmsKeyValidator.isValidLocalKmsKey(invalidShort));
+        assertFalse(KmsKeyValidator.isValidLocalKmsKey(invalidNull));
     }
 }
 ```
-
-### Step 3: Implement Secure Query Portal
-```java
-package com.masterclass.mongodb.miniproject.service;
-
-import com.masterclass.mongodb.miniproject.model.PatientRecord;
-import com.masterclass.mongodb.miniproject.security.LocalEncryptionUtil;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.query.Criteria;
-import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.stereotype.Service;
-
-@Service
-public class PatientPortalService {
-
-    private final MongoTemplate mongoTemplate;
-
-    public PatientPortalService(MongoTemplate mongoTemplate) {
-        this.mongoTemplate = mongoTemplate;
-    }
-
-    /**
-     * Queries a patient record by SSN.
-     * Since SSN is encrypted deterministically, we must encrypt the search key
-     * before running the exact-match query.
-     */
-    public PatientRecord findPatientBySsn(String rawSsn) {
-        // Encrypt the search parameter to match the database ciphertext
-        String encryptedSearchKey = LocalEncryptionUtil.encryptDeterministic(rawSsn);
-
-        Query query = new Query(Criteria.where("ssn_encrypted").is(encryptedSearchKey));
-        return mongoTemplate.findOne(query, PatientRecord.class);
-    }
-}
-```
-
-### Step 4: Verification CommandLineRunner
-```java
-package com.masterclass.mongodb.miniproject.test;
-
-import com.masterclass.mongodb.miniproject.model.PatientRecord;
-import com.masterclass.mongodb.miniproject.service.PatientPortalService;
-import org.bson.Document;
-import org.springframework.boot.CommandLineRunner;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.stereotype.Component;
-
-@Component
-public class SecurityVerificationRunner implements CommandLineRunner {
-
-    private final MongoTemplate mongoTemplate;
-    private final PatientPortalService portalService;
-
-    public SecurityVerificationRunner(MongoTemplate mongoTemplate, PatientPortalService portalService) {
-        this.mongoTemplate = mongoTemplate;
-        this.portalService = portalService;
-    }
-
-    @Override
-    public void run(String... args) throws Exception {
-        // Clear collections
-        mongoTemplate.dropCollection(PatientRecord.class);
-
-        // Save record (will trigger encryption listener)
-        PatientRecord patient = new PatientRecord("p-101", "Gordon Freeman", "111-22-333", "Resonance Cascade Exposure");
-        mongoTemplate.save(patient);
-
-        System.out.println("Patient Record Saved.");
-
-        // Query the raw database BSON document to verify data is encrypted on disk
-        Document rawDoc = mongoTemplate.getCollection("patient_records")
-                .find(new Document("_id", "p-101"))
-                .first();
-
-        System.out.println("\nDisk Storage Verification:");
-        System.out.println(" - Raw Document in MongoDB: " + rawDoc.toJson());
-        System.out.println(" - SSN is encrypted on disk: " + !rawDoc.getString("ssn_encrypted").equals("111-22-333"));
-        System.out.println(" - Diagnosis is encrypted on disk: " + !rawDoc.getString("diagnosis_encrypted").equals("Resonance Cascade Exposure"));
-
-        // Query using the portal service (will decrypt on read)
-        PatientRecord retrieved = portalService.findPatientBySsn("111-22-333");
-        
-        System.out.println("\nApplication Read Verification:");
-        System.out.println(" - Patient Name: " + retrieved.getName());
-        System.out.println(" - Decrypted SSN (Expected: 111-22-333): " + retrieved.getSsn());
-        System.out.println(" - Decrypted Diagnosis (Expected: Resonance Cascade Exposure): " + retrieved.getDiagnosis());
-    }
-}
-```
-This mini-project demonstrates how to implement client-side encryption using lifecycle events, protecting sensitive fields in the database while supporting exact-match queries.

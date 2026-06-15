@@ -1,0 +1,16 @@
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\notification\NotificationService.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\target\generated-sources\avro\com\springkafka\course\avro\BalanceHoldEvent.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\FinalProjectApplication.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\outbox\OutboxEvent.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\analytics\AnalyticsTopology.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\target\generated-sources\avro\com\springkafka\course\avro\TransferEvent.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\target\generated-sources\avro\com\springkafka\course\avro\FraudCheckEvent.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\outbox\TransferController.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\analytics\DistributedQueryController.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\outbox\OutboxPublisher.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\outbox\TransferService.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\config\KafkaTransactionConfig.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\saga\TransferSagaOrchestrator.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\outbox\OutboxRepository.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\balance\BalanceService.java
+C:\Users\Admin\Desktop\projects\learning-repo\courses\spring-kafka-production-course\final-project\src\main\java\com\springkafka\course\fraud\FraudService.java

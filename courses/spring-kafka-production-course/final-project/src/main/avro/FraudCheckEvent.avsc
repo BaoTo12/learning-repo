@@ -1,0 +1,11 @@
+{
+  "type": "record",
+  "name": "FraudCheckEvent",
+  "namespace": "com.springkafka.course.avro",
+  "doc": "Schema representing fraud validation outcomes",
+  "fields": [
+    { "name": "transferId", "type": "string" },
+    { "name": "status", "type": "string", "doc": "Status values: APPROVED, REJECTED" },
+    { "name": "reason", "type": "string" }
+  ]
+}

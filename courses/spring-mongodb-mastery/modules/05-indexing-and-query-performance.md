@@ -1,73 +1,85 @@
 # Module 05: Indexing and Query Performance
 
-This module covers the mechanics of indexing and query performance in MongoDB. It details index types, explains the ESR (Equality, Sort, Range) rule, demystifies execution explain plans, and provides strategies to eliminate database collection scans (`COLLSCAN`).
+Welcome class. Today we analyze the indexing architecture and performance tuning of **Spring Data MongoDB (CS-530)**.
+
+To scale any application, the database must retrieve data without scanning every BSON record from disk. Today we study index structures, the ESR (Equality, Sort, Range) rule, execution plans, covered queries, and high-performance keyset pagination.
 
 ---
 
-## 1. What Problem It Solves
+## 1. Academic Lecture: Indexing Mechanics & ESR Rules
 
-As collection sizes grow into millions of documents, scanning every BSON document on disk to satisfy a query becomes too slow.
+### Basic Level: Indexing & B-Trees
+By default, looking up documents in an unindexed collection requires MongoDB to read all records on disk. This is a Collection Scan (`COLLSCAN`), which runs in $O(N)$ time.
+MongoDB indexes organize data using B-Trees (Balanced Trees) in memory. A B-Tree maintains sorted keys, enabling searching, insertions, and deletions in $O(\log N)$ time. An index stores a small subset of the collection's fields in a sorted, traversable structure, referencing the full document location.
 
-MongoDB indexes solve this by:
-* **Reducing Disk I/O**: B-tree index structures allow the database to locate matching documents with $O(\log N)$ complexity rather than $O(N)$ scans.
-* **Avoiding In-Memory Sorts**: Compound indexes pre-sort values in order, eliminating CPU-heavy in-memory sorting operations (`SORT` stage in explain plans).
-* **Automating Data Lifecycle**: TTL (Time-To-Live) indexes automatically remove expired documents on a background thread.
-* **Optimizing Index Storage**: Partial and sparse indexes allow engineers to index only a subset of documents, reducing RAM overhead.
+### Intermediate Level: Spring Annotations & Index Lifecycle Management
+Spring Data provides declarative annotations to manage index definitions directly within Java domain entities:
+*   `@Indexed`: Creates a single-field index on a field. Supports configuration parameters like `direction` (ascending/descending), `unique` constraints, and `expireAfterSeconds` (TTL indexes).
+*   `@CompoundIndex`: Declares multi-field indexes at the class level. This is crucial when queries filter or sort by multiple parameters.
+*   `@GeoSpatialIndexed`: Creates a geospatial index (e.g., `2dsphere` or `2d`) to optimize location-based queries.
 
----
+**Production Index Lifecycle Management**: By default, Spring attempts to build indexes on startup when scanning `@Document` classes if `auto-index-creation` is enabled. 
+In high-scale production, **auto-index-creation must be disabled** (`spring.data.mongodb.auto-index-creation=false`). Building indexes synchronously on startup blocks application initialization and can crash replica sets when adding indexes to millions of existing records. Instead, build indexes asynchronously or using administrative migrations.
 
-## 2. Why MongoDB Instead of Relational Databases (RDBMS)
+### Advanced Level: ESR Rules, Execution Plans & Covered Queries
+*   **The ESR Rule**: When creating compound indexes for complex queries, you must arrange index fields in order:
+    1.  **E**quality: Fields checked with exact values (e.g., `tenantId = 'T-01'`).
+    2.  **S**ort: Fields used to order query results (e.g., `lastActive DESC`).
+    3.  **R**ange: Fields checked with range operators (e.g., `loginAttempts > 5`).
+    
+    *Why?* Placing a range field before a sort field prevents MongoDB from using the index for sorting, forcing a CPU-heavy in-memory sort stage (`SORT` stage).
+*   **Execution Plans (Explain plans)**: Using the `.explain("executionStats")` operator reveals how the query planner resolved the query:
+    *   `COLLSCAN`: Direct scanning of all files. (Avoid at all costs).
+    *   `IXSCAN`: Scanning B-Tree index keys.
+    *   `FETCH`: Retrieving the BSON document from disk using the index reference.
+*   **Covered Queries**: If an index contains *all* fields queried and projected, MongoDB bypasses document retrieval (`FETCH`) entirely, returning the data directly from the index keys (referred to as a covered query, showing `PROJECTION_COVERED` or no `FETCH` stage).
 
-While both systems use B-trees, MongoDB has unique indexing capabilities for nested structures:
-* **Multikey Indexes**: MongoDB natively indexes values inside nested arrays. For example, if a document contains an array of `tags: ["shoes", "sale"]`, a multikey index indexes each value in the array individually.
-* **Partial Index Filter Expressions**: Unlike standard relational databases where columns are either indexed or not, MongoDB partial indexes support complex JSON filters (`partialFilterExpression: { status: "ACTIVE" }`), which is ideal for sparse or polymorphic collections.
-* **Geospatial Indexes**: MongoDB natively supports $2d$ and $2dsphere$ indexes to calculate distance query logic on spherical systems (like mapping distances).
-
----
-
-## 3. Trade-offs and Limitations
-
-### Index Overhead
-Each index must be updated during every write, update, and delete operation. Over-indexing a collection slows down write throughput and consumes significant RAM (since active indexes must fit in memory).
-
-### Multikey Index Limits
-You cannot create a compound index that includes more than one array field. For example, if a document has arrays `locations` and `categories`, a compound index `{ locations: 1, categories: 1 }` is forbidden because the database would have to generate a Cartesian product of all array elements, degrading performance.
-
----
-
-## 4. Common Mistakes & Anti-patterns
-
-### Violating the ESR Rule (Equality, Sort, Range)
-Creating a compound index with range fields before sort fields (e.g., query status: `ACTIVE`, age > 30, sort by name, with index: `{ status: 1, age: 1, name: 1 }`).
-* *Why it's bad*: Placing the range field (`age`) before the sort field (`name`) prevents the database from using the index for sorting. The query planner will perform a CPU-heavy in-memory sort.
-* *Production Fix*: Always order compound index fields using the **ESR Rule**:
-  1. **E**quality fields first (fields checked with exact matches, like `status: "ACTIVE"`).
-  2. **S**ort fields second (fields defined in the query sort, like `name: 1`).
-  3. **R**ange fields last (fields checked with inequality filters, like `age: { $gt: 30 }`).
-
-### Offset-Based Pagination on Large Collections
-Using `.skip(100000).limit(20)` to paginate deep into a collection.
-* *Why it's bad*: The query planner must scan all 100,020 documents to discard the first 100,000, causing a slow collection scan (`COLLSCAN`) even if an index is present.
-* *Production Fix*: Use keyset/cursor-based pagination. Sort by a unique index field (such as `_id` or `createdAt`), and query relative to the last seen document: `{ createdAt: { $lt: lastSeenTime } }`.
-
-### Relying on Index Intersection instead of Compound Indexes
-Creating separate single-field indexes on `status` and `email` instead of a compound index `{ status: 1, email: 1 }`.
-* *Why it's bad*: While MongoDB can merge two single indexes at runtime (`AND_SORT` or `SUBPLAN` stages), this is significantly slower than using a dedicated compound index designed for the query.
+```mermaid
+graph TD
+    A[Query: tenant_id = 'T-01', Sort last_active DESC, attempts > 2] --> B[ESR Compound Index B-Tree]
+    B -->|Equality stage| C["Match tenant_id = 'T-01'"]
+    C -->|Sort stage| D["Traverse index pre-sorted by last_active DESC"]
+    D -->|Range stage| E["Filter range login_attempts > 2"]
+    E --> F[Fetch Document from Disk]
+```
 
 ---
 
-## 5. When NOT to Use Indexes
+## 2. Theory vs. Production Trade-offs
 
-* **Small Collections**: Collections with fewer than a few thousand documents do not benefit from indexes. Loading and scanning the index B-tree can add more latency than a direct collection scan.
-* **Write-Heavy, Read-Rare Collections**: If you are writing high-frequency audit logs that are rarely read (except for disaster recovery), keep indexes to a minimum (ideally only the default `_id` index) to maximize write throughput.
+| Index Configuration | Read Latency | Write Overhead | Memory Footprint (RAM) | Use Case |
+| :--- | :--- | :--- | :--- | :--- |
+| **Single-Field Index** | Moderate | Low | Low | Simple queries on a single key. |
+| **Compound ESR Index** | Very Low | Moderate-High | Moderate | Complex multi-filter queries and sorting. |
+| **TTL Index** | Moderate | Low | Low | Automated session/data expiration (background sweep). |
+| **Geospatial (2dsphere)** | Low | High | High | Location-based distance/proximity calculations. |
+| **Partial Index** | Low | Low | Very Low (Indexes subset) | Polymorphic or sparse collections (e.g., `status: "ACTIVE"`). |
 
 ---
 
-## 6. Spring Boot & Spring Data Implementation
+## 3. How to Use: Configuring Compound Indexes and Keyset Pagination in Spring
 
-This configuration showcases compound index definitions, partial indexes, and cursor-based pagination.
+Below we show an un-optimized pagination implementation (anti-pattern) followed by a production-grade compound index and keyset cursor-based pagination service.
 
-### Domain Object: User Session
+### A. The Offset-Based Pagination (Anti-Pattern)
+*Avoid using skip/offset pagination on large collections:*
+
+```java
+// DANGER: Using skip() forces MongoDB to scan all preceding documents.
+// For page 5000 (skip=100000, limit=20), the database reads 100,020 documents and discards 100,000.
+public List<UserSession> getSessionsUnoptimized(String tenantId, int pageNumber, int pageSize) {
+    Query query = new Query()
+            .addCriteria(Criteria.where("tenantId").is(tenantId))
+            .with(Sort.by(Sort.Direction.DESC, "lastActive"))
+            .skip((long) pageNumber * pageSize)
+            .limit(pageSize);
+    return mongoTemplate.find(query, UserSession.class);
+}
+```
+
+### B. Keyset Pagination & Custom Indices (Production Pattern)
+Here is the optimized configuration and service using a compound index with a partial filter expression, TTL, and keyset pagination.
+
 ```java
 package com.masterclass.mongodb.domain;
 
@@ -79,8 +91,7 @@ import org.springframework.data.mongodb.core.mapping.Field;
 import java.time.Instant;
 
 @Document(collection = "user_sessions")
-// Compound Index following the ESR Rule:
-// Equality (tenantId), Sort (lastActive), Range (loginAttempts)
+// Compound Index ordered by: Equality (tenantId) -> Sort (lastActive) -> Range (loginAttempts)
 @CompoundIndex(
     name = "idx_tenant_active_attempts", 
     def = "{'tenant_id': 1, 'last_active': -1, 'login_attempts': 1}"
@@ -102,7 +113,7 @@ public class UserSession {
     @Field("last_active")
     private Instant lastActive;
 
-    // TTL index: Spring instructs MongoDB to delete documents 24 hours (86400 seconds) after lastActive
+    // TTL index: Documents expire 24 hours (86400 seconds) after created_at
     @Indexed(expireAfterSeconds = 86400)
     @Field("created_at")
     private Instant createdAt;
@@ -127,7 +138,6 @@ public class UserSession {
 }
 ```
 
-### High-Performance Keyset (Cursor) Pagination Service
 ```java
 package com.masterclass.mongodb.service;
 
@@ -150,26 +160,21 @@ public class SessionPaginationService {
     }
 
     /**
-     * Retrieves a page of active sessions using keyset/cursor pagination.
-     * Avoids skip/offset performance degradation at scale.
-     *
-     * @param tenantId The company tenant ID
-     * @param lastSeenTime Cursor value representing the lastActive timestamp of the last document in the previous page
-     * @param limit Number of items to return per page
+     * Retrieves user sessions using keyset pagination.
+     * Combines equality filter (tenantId) and pagination cursor (lastActive)
+     * which aligns perfectly with the compound index idx_tenant_active_attempts.
      */
     public List<UserSession> getActiveSessionsCursor(String tenantId, Instant lastSeenTime, int limit) {
         Query query = new Query();
-        
         Criteria criteria = Criteria.where("tenant_id").is(tenantId);
         
-        // If lastSeenTime cursor is provided, query only documents older than the cursor
+        // If lastSeenTime is provided, we fetch records strictly older than the last record of the previous page
         if (lastSeenTime != null) {
             criteria.and("last_active").lt(lastSeenTime);
         }
         
         query.addCriteria(criteria);
-
-        // Sort by the indexed key in descending order to match the compound index definition
+        // Match the sorting of the compound index to avoid in-memory sorts
         query.with(Sort.by(Sort.Direction.DESC, "last_active"));
         query.limit(limit);
 
@@ -178,245 +183,89 @@ public class SessionPaginationService {
 }
 ```
 
----
-
-## 7. Production Architecture Examples
-
-### 1. ESR Compound Index Traversing
-Compound index `{ tenant_id: 1, last_active: -1, login_attempts: 1 }` allows MongoDB to satisfy equality checks, sorting, and range filters in a single pass:
-
-```mermaid
-graph TD
-    A[Query: tenant_id = 'T-01', Sort last_active DESC, attempts > 2] --> B[ESR Compound Index Tree]
-    B -->|Step 1: Equality| C["Match tenant_id = 'T-01'"]
-    C -->|Step 2: Sort| D["Navigate nodes pre-sorted by last_active DESC"]
-    D -->|Step 3: Range| E["Filter nodes where login_attempts > 2"]
-    E --> F[Locate BSON Document on Disk]
-```
-
-### 2. Execution Plan Flow: Explain Mechanics
-When executing a query, the MongoDB Query Planner runs the query through several execution stages. The output of an explain plan indicates whether the query is optimized:
-
-```mermaid
-graph TD
-    A[Query Request] --> B[Query Planner]
-    B -->|Scenario 1: No Index Matches| C[COLLSCAN Stage]
-    C -->|Reads entire collection from disk| D[Low Performance / High CPU]
-    
-    B -->|Scenario 2: Index Matches| E[IXSCAN Stage]
-    E --> F[FETCH Stage]
-    F -->|Reads only matched documents| G[High Performance]
-    
-    B -->|Scenario 3: Covered Index Query| H[IXSCAN Stage only]
-    H -->|All fields present in index| I[PROJECTION_COVERED / Maximum Performance]
-```
+### Line-by-Line Code Explanation:
+1.  `@CompoundIndex(def = "{'tenant_id': 1, 'last_active': -1, 'login_attempts': 1}")`: Creates a multi-key B-Tree. It indexes `tenant_id` in ascending order, then sorts the pointer list by `last_active` descending, and resolves ties via `login_attempts`.
+2.  `@Indexed(expireAfterSeconds = 86400)`: Sets up a TTL index on `created_at`. Every minute, MongoDB's background threads delete records where `now() - created_at > 86400` seconds.
+3.  `criteria.and("last_active").lt(lastSeenTime)`: This filters out all items after the cursor, converting the skip offset query into a quick range query that points directly to the next B-Tree segment.
+4.  `query.with(Sort.by(Sort.Direction.DESC, "last_active"))`: Signals the MongoDB engine to read the index structure downwards, matching the indexed ordering exactly, yielding zero CPU overhead for sorting.
 
 ---
 
-## 8. Interview-Level Questions
+## 4. Common Errors & Pitfalls
 
-### Q1: Explain the ESR rule. What happens to the query performance if you define an index as `{ age: 1, name: 1, status: 1 }` but query `status = "ACTIVE"` and sort by `name`?
-**Answer**:
-The ESR (Equality, Sort, Range) rule states that a compound index must order fields as: **Equality** fields first, **Sort** fields second, and **Range** fields last.
-* If the index is defined as `{ age: 1, name: 1, status: 1 }` (where `age` is a range field, `name` is a sort field, and `status` is an equality field), querying `status = "ACTIVE"` and sorting by `name` renders the index ineffective.
-* Because the index key starts with `age` (which is not in the query), the engine cannot navigate the index tree directly. It will perform a full scan of the index or collection, followed by a slow in-memory sort.
-
-### Q2: What is a "Covered Query" in MongoDB, and what stage will you see in the execution explain plan?
-**Answer**:
-A **Covered Query** is a query that can be satisfied entirely by index keys without reading any documents from disk. For a query to be covered:
-1. All fields in the query filter must be part of the index.
-2. All fields returned in the projection must be part of the index.
-3. The `_id` field must be explicitly excluded from the projection (unless `_id` is part of the index).
-* **Explain Plan Stage**: In the explain output, you will see `IXSCAN` but *no* `FETCH` stage. The `totalDocsExamined` will be `0`.
-
-### Q3: How do TTL indexes work under the hood? What are the limitations regarding replication and compound keys?
-**Answer**:
-* **Under the Hood**: MongoDB background threads run once every 60 seconds to find and delete expired documents. Expired documents are not deleted immediately at the exact second they expire.
-* **Replication**: The TTL deletion task runs only on the primary node. The primary writes deletes to the oplog, which replica secondaries replicate.
-* **Limitations**: 
-  1. You cannot build a TTL index on a compound index (it must target a single date field).
-  2. You cannot build a TTL index on capped collections.
-  3. If a field contains an array of dates, the document expires when the *earliest* date in the array passes.
+### Pitfall 1: Indexing High-Cardinality Arrays (Multikey Index Explosion)
+*   **Why it fails**: Building an index on an array of objects (like `{ "order_items": 1 }` where order items can have nested lists) generates index keys for every single element in the array. If a document has 100 array items, it creates 100 B-tree pointer keys. If a compound index targets two array fields, MongoDB rejects it outright (`cannot index parallel arrays`).
+*   **Mitigation**: Restructure data to keep arrays small, index specific fields only, or use partial indexes with a restrictive filter.
 
 ---
 
-## 9. Hands-on Exercises
+## 5. Socratic Review Questions
 
-### Exercise 1: Evaluating Explain Plans via Mongo Shell
-1. Seed your local `user_sessions` collection with 50,000 documents.
-2. Run a query in `mongosh` without an index and call `.explain("executionStats")`:
-   ```javascript
-   db.user_sessions.find({ username: "engineer-01" }).explain("executionStats")
-   ```
-3. Verify that the execution stage is `COLLSCAN` and check the `executionTimeMillis`.
-4. Create an index:
-   ```javascript
-   db.user_sessions.createIndex({ username: 1 })
-   ```
-5. Rerun the explain plan and verify that the stage changes to `IXSCAN` and `FETCH`.
+### Question 1
+Explain the difference in execution stages between a Covered Query and a normal indexed query.
 
-### Exercise 2: Testing Covered Queries
-1. Create a compound index:
-   ```javascript
-   db.user_sessions.createIndex({ tenant_id: 1, username: 1 })
-   ```
-2. Run a query that filters by `tenant_id` and projects only `username` and excludes `_id`:
-   ```javascript
-   db.user_sessions.find({ tenant_id: "T-01" }, { username: 1, _id: 0 }).explain("executionStats")
-   ```
-3. Confirm that `totalDocsExamined` is `0` and that the execution stage contains no `FETCH` node.
+#### Answer
+A normal indexed query executes `IXSCAN` to scan the B-Tree index to match keys, followed by a `FETCH` stage where the database loads the actual BSON document from disk into memory to retrieve other fields. A Covered Query contains all the filtering and projection fields within the index itself, meaning MongoDB executes `IXSCAN` and returns the output directly from index memory without any `FETCH` stage (saving disk I/O).
 
 ---
 
-## 10. Mini-Project: Geo-Spatial Log Search Engine
+## 6. Hands-on Challenge: Keyset Pagination Index Verification
 
-### Scenario
-You are building the backend for a food delivery platform. The system processes delivery updates from couriers, storing their latitude and longitude coordinates. 
-To optimize queries, you must build a geo-spatial search API that retrieves all active couriers within a 5-kilometer radius of a customer's location. 
-The API must use a geospatial `$2dsphere` index, filter by courier status, and support keyset pagination.
+### The Challenge
+In this challenge, you will implement a query builder using keyset pagination and write tests to verify it operates on an index.
+Your task:
+1. Complete `ActiveSessionQueryBuilder.java`.
+2. Complete the query criteria to filter by `tenantId` (Equality) and `lastActive` (Sort/Range).
+3. The method must accept a pagination cursor `lastActiveCursor` (Instant) and retrieve items in descending order.
 
-### Step 1: Implement the Domain Document with Geospatial Mappings
-MongoDB stores geographical locations using the GeoJSON format: `{ type: "Point", coordinates: [longitude, latitude] }`.
+Complete the implementation stub:
 
 ```java
-package com.masterclass.mongodb.miniproject.model;
+package com.masterclass.mongodb.challenge;
 
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.index.GeoSpatialIndexType;
-import org.springframework.data.mongodb.core.index.GeoSpatialIndexed;
-import org.springframework.data.mongodb.core.index.CompoundIndex;
-import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.core.mapping.Field;
-import org.springframework.data.mongodb.core.geo.GeoJsonPoint;
-
-@Document(collection = "courier_locations")
-// Compound index combining courier status and geolocation to optimize distance queries
-@CompoundIndex(name = "idx_status_location", def = "{'status': 1, 'location': '2dsphere'}")
-public class CourierLocation {
-
-    @Id
-    private String id;
-
-    @Field("courier_id")
-    private String courierId;
-
-    private String status; // e.g. "ACTIVE", "BUSY"
-
-    // GeoJsonPoint represents a longitude/latitude coordinate pair
-    private GeoJsonPoint location;
-
-    public CourierLocation() {}
-
-    public CourierLocation(String id, String courierId, String status, GeoJsonPoint location) {
-        this.id = id;
-        this.courierId = courierId;
-        this.status = status;
-        this.location = location;
-    }
-
-    public String getId() { return id; }
-    public String getCourierId() { return courierId; }
-    public String getStatus() { return status; }
-    public GeoJsonPoint getLocation() { return location; }
-}
-```
-
-### Step 2: Implement Geo-Spatial Search Service
-```java
-package com.masterclass.mongodb.miniproject.service;
-
-import com.masterclass.mongodb.miniproject.model.CourierLocation;
-import org.springframework.data.geo.Distance;
-import org.springframework.data.geo.Metrics;
-import org.springframework.data.geo.Point;
-import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
-import org.springframework.stereotype.Service;
-import java.util.List;
+import java.time.Instant;
 
-@Service
-public class CourierSearchService {
+public class ActiveSessionQueryBuilder {
 
-    private final MongoTemplate mongoTemplate;
-
-    public CourierSearchService(MongoTemplate mongoTemplate) {
-        this.mongoTemplate = mongoTemplate;
-    }
-
-    /**
-     * Locates all active couriers within a specific radius of a customer's location.
-     * Uses the 2dsphere index to perform an optimized distance search.
-     *
-     * @param longitude Customer longitude
-     * @param latitude Customer latitude
-     * @param radiusKm Search radius in kilometers
-     * @param limit Limit the output results
-     */
-    public List<CourierLocation> findNearCouriers(double longitude, double latitude, double radiusKm, int limit) {
-        Point customerPoint = new Point(longitude, latitude);
-        Distance searchDistance = new Distance(radiusKm, Metrics.KILOMETERS);
-
+    public static Query buildCursorQuery(String tenantId, Instant lastActiveCursor, int limit) {
         Query query = new Query();
-        
-        // Apply geospatial nearSphere search combined with status equality filter
-        query.addCriteria(
-                Criteria.where("status").is("ACTIVE")
-                        .and("location").nearSphere(customerPoint).maxDistance(searchDistance.getValue() / 6378.1) // Convert radius to radians
-        );
-        
-        query.limit(limit);
-
-        return mongoTemplate.find(query, CourierLocation.class);
+        // TODO: Create criteria targeting tenantId and filtering by lastActiveCursor if not null.
+        // TODO: Add descending sort by last_active.
+        // TODO: Set limit.
+        return query;
     }
 }
 ```
 
-### Step 3: Implement Verification Logic
+### Verification Test
+Verify your code with this JUnit 5 test class:
+
 ```java
-package com.masterclass.mongodb.miniproject.test;
+package com.masterclass.mongodb.challenge;
 
-import com.masterclass.mongodb.miniproject.model.CourierLocation;
-import com.masterclass.mongodb.miniproject.service.CourierSearchService;
-import org.springframework.boot.CommandLineRunner;
-import org.springframework.data.mongodb.core.MongoTemplate;
-import org.springframework.data.mongodb.core.geo.GeoJsonPoint;
-import org.springframework.stereotype.Component;
-import java.util.List;
+import org.junit.jupiter.api.Test;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.query.Query;
+import java.time.Instant;
+import static org.junit.jupiter.api.Assertions.*;
 
-@Component
-public class GeoVerificationRunner implements CommandLineRunner {
+class ActiveSessionQueryBuilderTest {
 
-    private final MongoTemplate mongoTemplate;
-    private final CourierSearchService searchService;
-
-    public GeoVerificationRunner(MongoTemplate mongoTemplate, CourierSearchService searchService) {
-        this.mongoTemplate = mongoTemplate;
-        this.searchService = searchService;
-    }
-
-    @Override
-    public void run(String... args) throws Exception {
-        // Clear collections
-        mongoTemplate.dropCollection(CourierLocation.class);
-
-        // Seed Courier Locations (Downtown Saigon area)
-        // coordinates parameter format: [longitude, latitude]
-        mongoTemplate.save(new CourierLocation("c-001", "C_EXPRESS_1", "ACTIVE", new GeoJsonPoint(106.7018, 10.7760))); // Downtown
-        mongoTemplate.save(new CourierLocation("c-002", "C_EXPRESS_2", "ACTIVE", new GeoJsonPoint(106.7118, 10.7860))); // 1.8km away
-        mongoTemplate.save(new CourierLocation("c-003", "C_EXPRESS_3", "BUSY",   new GeoJsonPoint(106.7018, 10.7760))); // Match distance, mismatch status
-        mongoTemplate.save(new CourierLocation("c-004", "C_EXPRESS_4", "ACTIVE", new GeoJsonPoint(106.8500, 10.9000))); // Far out (20km+)
-
-        // Query active couriers within a 5km radius of downtown (106.7018, 10.7760)
-        List<CourierLocation> results = searchService.findNearCouriers(106.7018, 10.7760, 5.0, 10);
-
-        System.out.println("Geospatial Search Results:");
-        System.out.println("Expected Match Count: 2");
-        System.out.println("Actual Match Count: " + results.size());
-        for (CourierLocation loc : results) {
-            System.out.println(" - Courier ID: " + loc.getCourierId() + ", Status: " + loc.getStatus());
-        }
+    @Test
+    void testBuildCursorQuery() {
+        Instant cursor = Instant.now().minusSeconds(3600);
+        Query query = ActiveSessionQueryBuilder.buildCursorQuery("T-001", cursor, 10);
+        
+        assertNotNull(query);
+        assertEquals(10, query.getLimit());
+        assertTrue(query.getSortObject().containsKey("last_active"));
+        assertEquals(-1, query.getSortObject().get("last_active"));
+        
+        String queryStr = query.getQueryObject().toJson();
+        assertTrue(queryStr.contains("T-001"));
     }
 }
 ```
-This mini-project demonstrates how to combine geospatial query mechanics with equality checks into a single compound geospatial index, optimizing search performance for real-time applications.

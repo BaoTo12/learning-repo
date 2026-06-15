@@ -140,63 +140,30 @@ public class MongoConnectionManager {
 }
 ```
 
----
-
 ## 📂 Syllabus Navigation Index
 
-The course consists of **21 modules** (a Beginner's Primer plus 20 modules mapping directly to Chapters 1–20 of the textbook):
+The course consists of **20 modules** mapping core MongoDB concepts to production Java implementation:
 
-### Part I: Introduction
-*   **[Module 00: Beginner's Primer to NoSQL & Java-MongoDB](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/00-beginners-primer.md)**
-    *   *Core concepts*: SQL vs NoSQL comparisons, BSON/JSON, and a fully runnable Java CRUD operations walkthrough.
-*   **[Module 01: Introduction to MongoDB](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/01-introduction.md)**
-    *   *Core concepts*: Document database design philosophies, scale-out versus scale-up models, SQL vs. Java object-mapping comparisons.
-*   **[Module 02: Getting Started with MongoDB](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/02-getting-started.md)**
-    *   *Core concepts*: BSON serialization, document mapping in Java using `Document`, BSON datatypes, and running simple inserts.
-*   **[Module 03: Creating, Updating, and Deleting Documents](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/03-crud-modifications.md)**
-    *   *Core concepts*: Java CRUD operations, atomic update operators (`$set`, `$inc`, `$push`, `$pull`), array positionals, and `arrayFilters`.
-*   **[Module 04: Querying](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/04-querying.md)**
-    *   *Core concepts*: Find collections, conditional logical operators (`Filters`), cursor paging using `FindIterable`, limits, and projections.
-
-### Part II: Designing Your Application
-*   **[Module 05: Indexes](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/05-indexes.md)**
-    *   *Core concepts*: Creating indexes in Java (`Indexes`), single/compound sorting directions, explain document parsing, and collision mitigations.
-*   **[Module 06: Special Index and Collection Types](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/06-special-collections.md)**
-    *   *Core concepts*: Geospatial query scopes, Text searching, Capped collections, TTL (Time-To-Live) index setups, and GridFS bucket streams.
-*   **[Module 07: Introduction to the Aggregation Framework](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/07-aggregation-framework.md)**
-    *   *Core concepts*: Building pipelines using Java `Aggregates` factory stages (`match`, `unwind`, `group`, `project`, `facet`), memory limits, and disk swaps.
-*   **[Module 08: Transactions](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/08-transactions.md)**
-    *   *Core concepts*: ACID transactions in Java, `ClientSession` management, lock timeouts, and transient write-conflict auto-retries.
-*   **[Module 09: Application Design](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/09-application-design.md)**
-    *   *Core concepts*: Schema design patterns (Bucket, Polymorphic, Subset), cardinality references, and data migrations in Java.
-
-### Part III: Replication
-*   **[Module 10: Setting Up a Replica Set](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/10-replica-set-setup.md)**
-    *   *Core concepts*: High availability topologies, hidden nodes, arbiters, voting priority configurations, and configuration documents.
-*   **[Module 11: Components of a Replica Set](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/11-replica-set-components.md)**
-    *   *Core concepts*: Oplog syncing mechanics, heartbeat checks, election state routing, rollback files, and partition recovery.
-*   **[Module 12: Connecting to a Replica Set from Your Application](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/12-connecting-replica-sets.md)**
-    *   *Core concepts*: Connection strings, write concerns (`WriteConcern.MAJORITY`), read preferences, and connection pool tuning in Java.
-*   **[Module 13: Replica Set Administration](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/13-replica-set-administration.md)**
-    *   *Core concepts*: Dynamic oplog resizing commands, secondary index builds in standalone modes, and lag monitoring.
-
-### Part IV: Sharding
-*   **[Module 14: Introduction to Sharding](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/14-sharding-introduction.md)**
-    *   *Core concepts*: Scaling limits, sharded cluster topologies (Config servers, mongos routing, shards), and query routing.
-*   **[Module 15: Configuring Sharding](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/15-sharding-configuration.md)**
-    *   *Core concepts*: Balancer scheduling, chunk range splitting, adding shards from replica sets, and collection-level activations.
-*   **[Module 16: Choosing a Shard Key](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/16-shard-key-selection.md)**
-    *   *Core concepts*: Key selection distributions (ranged vs. hashed), composite key routing, cardinality limitations, and split safety.
-*   **[Module 17: Sharding Administration](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/17-sharding-administration.md)**
-    *   *Core concepts*: Running status checks, tracing router network pools, split finds, and resolving jumbo chunks.
-
-### Part V: Application Administration
-*   **[Module 18: Seeing What Your Application Is Doing](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/18-application-diagnostics.md)**
-    *   *Core concepts*: Current operations tracking (`currentOp`), killing hanging threads (`killOp`), profiler levels, and size calculations.
-*   **[Module 19: An Introduction to MongoDB Security](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/19-security.md)**
-    *   *Core concepts*: RBAC database roles, SCRAM authentication, TLS/SSL configurations, and x.509 client certificate handshakes in Java.
-*   **[Module 20: Durability](file:///c:/Users/Admin/Desktop/projects/learning-repo/mongodb-definitive-guide/modules/20-durability.md)**
-    *   *Core concepts*: WiredTiger journaling, read concern levels (`local`, `majority`, `linearizable`), commit guarantees, and database checks.
+*   **[Module 01: MongoDB Fundamentals](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/01-mongodb-fundamentals.md)**: Document db vs RDBMS, BSON vs JSON datatypes, ObjectId internals, embedded data vs arrays.
+*   **[Module 02: Setting Up MongoDB with Java](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/02-setting-up-mongodb-with-java.md)**: Local/Atlas configs, connection strings, auth controls, and MongoClient connection pools.
+*   **[Module 03: Basic CRUD Operations](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/03-basic-crud-operations.md)**: Single document CRUD, update modifiers, array filters, upserts, deletes, and soft deletes.
+*   **[Module 04: Querying Deep Dive](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/04-querying-deep-dive.md)**: Query filters, logical operators, projections, array matching, and keyset pagination.
+*   **[Module 05: Schema Design in MongoDB](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/05-schema-design-in-mongodb.md)**: Embedding vs referencing, denormalization, 16MB limit, and advanced modeling patterns.
+*   **[Module 06: Indexing](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/06-indexing.md)**: Single-field, compound, unique, multikey, partial, TTL indexes, ESR rules, explain plans.
+*   **[Module 07: Aggregation Framework](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/07-aggregation-framework.md)**: Pipelines, match/group/lookup/facet stages, allowDiskUse memory configurations.
+*   **[Module 08: Data Validation](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/08-data-validation.md)**: JSON Schema validation ($jsonSchema), validation action errors/warns, strict/moderate levels.
+*   **[Module 09: Transactions and Consistency](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/09-transactions-and-consistency.md)**: Multi-document ACID transactions, sessions, write concern majority, and read preference routing.
+*   **[Module 10: Error Handling and Reliability](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/10-error-handling-and-reliability.md)**: MongoException classes, unique key violations, timeouts, and network retry loops.
+*   **[Module 11: Bulk Operations](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/11-bulk-operations.md)**: insertMany vs bulkWrite, ordered vs unordered writes execution models.
+*   **[Module 12: Object Mapping in Java](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/12-object-mapping-in-java.md)**: Direct Document maps vs POJO registries, CodecRegistry, and mapping nested entities.
+*   **[Module 13: Spring Data MongoDB Comparison](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/13-spring-data-mongodb-comparison.md)**: Abstractions comparison, MongoTemplate vs MongoRepository, mapping annotations.
+*   **[Module 14: Performance Optimization](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/14-performance-optimization.md)**: Projections, connection pools, cursor batch sizes, and avoiding N+1 query loops.
+*   **[Module 15: Security](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/15-security.md)**: SCRAM, x.509 cert validation, TLS/SSL transport security, and regex injection mitigations.
+*   **[Module 16: Deployment and Production Practices](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/16-deployment-and-production-practices.md)**: Replica sets setups, elections, failovers, and sharded cluster topologies configurations.
+*   **[Module 17: Testing MongoDB Applications](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/17-testing-mongodb-applications.md)**: Integration testing via Testcontainers and database session cleaning.
+*   **[Module 18: Real-World Project](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/18-real-world-project.md)**: End-to-end e-commerce transactional booking API integration.
+*   **[Module 19: Interview Preparation](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/19-interview-preparation.md)**: System design and scenario-based Q&A collections.
+*   **[Module 20: Learning Roadmap](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/modules/20-learning-roadmap.md)**: A 4-week structured milestone roadmap study plan.
 
 ---
 

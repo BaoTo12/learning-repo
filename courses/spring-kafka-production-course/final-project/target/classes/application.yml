@@ -1,0 +1,65 @@
+spring:
+  application:
+    name: spring-kafka-monolith-final-project
+  
+  # Database configuration: defaults to local in-memory H2 for easy compiling and verification
+  datasource:
+    url: jdbc:h2:mem:ledger_db;DB_CLOSE_DELAY=-1
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: password
+  jpa:
+    database-platform: org.hibernate.dialect.H2Dialect
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    
+    properties:
+      schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+      specific.avro.reader: true
+      # State discovery server configuration for interactive queries
+      application.server: ${SPRING_APPLICATION_SERVER:localhost:8080}
+      
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: io.confluent.kafka.serializers.KafkaAvroSerializer
+      transaction-id-prefix: tx-monolith-
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+        
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: io.confluent.kafka.serializers.KafkaAvroDeserializer
+      auto-offset-reset: earliest
+      isolation-level: read_committed
+      properties:
+        specific.avro.reader: true
+        
+    # Streams configuration
+    streams:
+      application-id: spend-analytics-pipeline
+      properties:
+        default.key.serde: org.apache.kafka.common.serialization.Serdes$StringSerde
+        default.value.serde: org.apache.kafka.common.serialization.Serdes$DoubleSerde
+        state.dir: /tmp/kafka-streams
+
+# Spring Boot Actuator for Metrics & Prometheus endpoint
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      show-details: always
