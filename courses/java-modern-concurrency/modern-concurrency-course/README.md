@@ -29,13 +29,14 @@ The curriculum consists of 8 comprehensive, technical modules:
 | Module | Topic | File Link |
 | :--- | :--- | :--- |
 | **01** | Evolution of Concurrency & Platform Thread Limitations | [01-concurrency-evolution.md](./modules/01-concurrency-evolution.md) |
-| **02** | Virtual Threads Concept & Lifecycle | [02-understanding-virtual-threads.md](./modules/02-understanding-virtual-threads.md) |
-| **03** | Thread Pinning & ThreadLocal Conundrums | [03-pinning-threadlocal-conundrums.md](./modules/03-pinning-threadlocal-conundrums.md) |
-| **04** | ForkJoinPool & Continuation Mechanics | [04-forkjoin-continuations.md](./modules/04-forkjoin-continuations.md) |
-| **05** | Structured Concurrency & StructuredTaskScope | [05-structured-concurrency.md](./modules/05-structured-concurrency.md) |
-| **06** | Context Propagation via Scoped Values | [06-scoped-values.md](./modules/06-scoped-values.md) |
-| **07** | Virtual Threads vs Reactive Programming | [07-reactive-vs-virtual-threads.md](./modules/07-reactive-vs-virtual-threads.md) |
-| **08** | Modern Framework Integrations & Best Practices | [08-framework-integrations.md](./modules/08-framework-integrations.md) |
+| **02** | Virtual Threads, Pinning, and ThreadLocal | [02-understanding-virtual-threads.md](./modules/02-understanding-virtual-threads.md) |
+| **03** | The Mechanics of Modern Concurrency | [03-mechanics-of-modern-concurrency.md](./modules/03-mechanics-of-modern-concurrency.md) |
+| **04** | Structured Concurrency & StructuredTaskScope | [04-structured-concurrency.md](./modules/04-structured-concurrency.md) |
+| **05** | Context Propagation via Scoped Values | [05-scoped-values.md](./modules/05-scoped-values.md) |
+| **06** | Virtual Threads vs Reactive Programming | [06-reactive-vs-virtual-threads.md](./modules/06-reactive-vs-virtual-threads.md) |
+| **07** | Modern Framework Integrations & Best Practices | [07-framework-integrations.md](./modules/07-framework-integrations.md) |
+| **08** | Conclusion and Takeaways | [08-conclusion-takeaways.md](./modules/08-conclusion-takeaways.md) |
+
 
 ---
 

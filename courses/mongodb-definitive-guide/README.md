@@ -167,6 +167,33 @@ The course consists of **20 modules** mapping core MongoDB concepts to productio
 
 ---
 
+## 🗺️ MongoDB Query Language (MQL) Sub-Course
+
+For an in-depth focus on raw database query crafting, client tool connections (Compass and DBeaver), and performance tuning of MQL filters, visit our sub-course:
+
+*   **[MongoDB Query Language (MQL) Learning Roadmap](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/README.md)**
+    *   [Module 01: MongoDB Fundamentals & Environment Setup](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/01-mongodb-fundamentals.md)
+    *   [Module 02: Query Language Fundamentals](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/02-query-language-fundamentals.md)
+    *   [Module 03: Logical Operators](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/03-logical-operators.md)
+    *   [Module 04: Element Operators](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/04-element-operators.md)
+    *   [Module 05: Array Query Operations](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/05-array-query-operations.md)
+    *   [Module 06: Embedded Document Queries](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/06-embedded-document-queries.md)
+    *   [Module 07: Evaluation Operators](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/07-evaluation-operators.md)
+    *   [Module 08: Projection](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/08-projection.md)
+    *   [Module 09: Sorting and Pagination](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/09-sorting-and-pagination.md)
+    *   [Module 10: Update Query Language](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/10-update-query-language.md)
+    *   [Module 11: Array Updates](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/11-array-updates.md)
+    *   [Module 12: Delete Operations](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/12-delete-operations.md)
+    *   [Module 13: Aggregation Framework Fundamentals](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/13-aggregation-fundamentals.md)
+    *   [Module 14: Aggregation Stages](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/14-aggregation-stages.md)
+    *   [Module 15: Advanced Aggregation](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/15-advanced-aggregation.md)
+    *   [Module 16: Aggregation Expressions](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/16-aggregation-expressions.md)
+    *   [Module 17: Index-Aware Query Design](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/17-index-aware-query-design.md)
+    *   [Module 18: Query Performance Analysis](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/18-query-performance-analysis.md)
+    *   [Module 19: Transactions and Consistency](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/mongodb-definitive-guide/query-language-roadmap/modules/19-transactions-and-consistency.md)
+
+---
+
 ## 🎓 Grading & Assessment Criteria
 
 Your final score in this course is based on:
