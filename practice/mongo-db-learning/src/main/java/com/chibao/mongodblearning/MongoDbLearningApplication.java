@@ -1,8 +1,6 @@
 package com.chibao.mongodblearning;
 
 
-import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoClients;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Filters;
@@ -14,14 +12,10 @@ import java.util.List;
 public class MongoDbLearningApplication {
 
     public static void main(String[] args) {
-        //
-        String connectionUrl = "mongodb://localhost:27017";
-        try (MongoClient mongoClient = MongoClients.create(connectionUrl)) {
-            System.out.println("Connection client established successfully.");
+        // Retrieve the database connection from the centralized connection manager
+        MongoDatabase database = MongoConnectionManager.getDatabase("store_db");
 
-            MongoDatabase database = mongoClient.getDatabase("academic_sandbox");
-
-            MongoCollection<Document> collection = database.getCollection("students");
+        MongoCollection<Document> collection = database.getCollection("students");
 
             // clear data on collection
             collection.drop();
@@ -74,7 +68,5 @@ public class MongoDbLearningApplication {
             // Confirm removal
             long countAfterDelete = collection.countDocuments(Filters.eq("_id", "STD-101"));
             System.out.println("Count remaining for STD-101: " + countAfterDelete);
-        }
     }
-
 }
