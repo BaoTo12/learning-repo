@@ -1,0 +1,120 @@
+Preface
+
+In an enterprise system, a properly designed database access layer can have a great impact on the overall application performance. According to Appdynamics[^3]
+
+More than half of application performance bottlenecks originate in the database
+
+Data is spread across various structures (table rows, index nodes), and database records can be read and written by multiple concurrent users. From a concurrency point of view, this is a very challenging task, and, to get the most out of a persistence layer, the data access logic must resonate with the underlying database system.
+
+Figure I.1: Data access skill stack
+
+A typical RDBMS (Relational Database Management System) data access layer requires mastering various technologies, and the overall enterprise solution is only as strong as the team’s weakest skills. Before advancing to higher abstraction layers such as ORM (ObjectRelational Mapping) frameworks, it is better to conquer the lower layers first.
+
+[^3]: <http://www.appdynamics.com/solutions/database-monitoring/>
+
+The database server and the connectivity layer
+
+The database manual is not only meant for database administrators. Interacting with a database, without knowing how it works, is like driving a racing car without taking any driving lesson. Getting familiar with the SQL standard and the database-specific features can make the difference between a high-performance application and one that barely crawls.
+
+The fear of database portability can lead to avoiding highly effective features just because they are not interchangeable across various database systems. In reality, it is more common to end up with a sluggish database layer than having to port an already running system to a new database solution.
+
+All data access frameworks rely on JDBC (Java Database Connectivity) API for communicating with a database server. JDBC offers many performance optimization techniques, aiming to reduce transaction response time and accommodate more traffic.
+
+The first part of the book is therefore dedicated to JDBC and database essentials, and it covers topics such as database connection management, statement batching, result set fetching, and database transactions.
+
+The application data access layer
+
+There are data access patterns that have proven their effectiveness in many enterprise application scenarios. Martin Fowler’s Patterns of Enterprise Application Architecture[^4] is a must read for every enterprise application developer. Beside the object-relational mapping pattern, most ORM frameworks also employ techniques such as Unit of Work, Identity Map, Lazy Loading, Embedded Value, Entity Inheritance or Optimistic and Pessimistic Locking.
+
+The ORM framework
+
+ORM tools can boost application development speed, but the learning curve is undoubtedly steep. The only way to address the inherent complexity of bridging relational data with the application domain model is to fully understand the ORM framework in use.
+
+Sometimes even the reference documentation might not be enough, and getting familiar with the source code is inevitable when facing performance related problems. JPA (Java Persistence API) excels in writing data because all DML (Data Manipulation Language) statements are automatically updated whenever the persistence model changes, therefore speeding up the iterative development process.
+
+The second part of this book describes various Hibernate-specific optimization techniques like identifier generators, effective entity fetching, and state transitions, application-level transactions, and entity caching.
+
+[^4]: <http://www.amazon.com/Patterns-Enterprise-Application-Architecture-Martin/dp/0321127420>
+
+The native query builder framework
+
+JPA and Hibernate were never meant to substitute SQL[^5], and native queries are unavoidable in any non-trivial enterprise application. While JPA makes it possible to abstract DML statements and common entity retrieval queries, when it comes to reading and processing data, nothing can beat native SQL.
+
+JPQL (Java Persistence Querying Language) abstracts the common SQL syntax that is supported by most relation databases. Because of this, JPQL cannot take advantage of Window Functions, Common Table Expressions, Derived tables or PIVOT.
+
+As opposed to JPA, jOOQ (Java Object Oriented Query)[^6] offers a type-safe API, which embraces any database-specific querying feature offered by the underlying database system. Just like Criteria API protects against SQL injection attacks when generating entity queries dynamically, jOOQ offers the same safety guarantee when building native SQL statements.
+
+For this reason, the third part of the book is about advanced querying techniques with jOOQ.
+
+About database performance benchmarks
+
+Throughout this book, there are benchmarks aimed to demonstrate the relative gain of a certain performance optimization. The benchmarks results are always dependent on the underlying hardware, operating system and database server configuration, database size and concurrency patterns. For this reason, the absolute values are not as important as the relative optimization gain. In reality, the most relevant benchmark results are the ones against the actual production system.
+
+To prevent the reader from comparing one database against another and drawing a wrong conclusion based on some use case specific benchmarks, the database names are obfuscated as DB_A, DB_B, DB_C, and DB_D.
+
+All the source code, for every example that was used in this book, is available on GitHuba.
+
+ahttps://github.com/vladmihalcea/high-performance-java-persistence
+
+[^5]: <https://plus.google.com/+GavinKing/posts/LGJU1NorAvY>
+
+[^6]: <http://www.jooq.org/>
+
+Video Course
+
+Because you purchased this book, you have a 33% discount for my High-Performance Java Persistence video courses.
+
+All you have to do is to use the EBOOK33OFF coupon code for any video course:
+
+Mach 2 - Full Edition[^7]
+
+Mach 2 - Online Edition[^8]
+
+Mach 1 - Full Edition[^9]
+
+Mach 1 - Online Edition[^10]
+
+Testimonials
+
+“I am very satisfied with the High-Performance Java Persistence Mach 2 video course, the information it contains is immediately applicable to any Hibernate/JPA project you are currently working on.
+
+The video/audio quality makes the content engaging and the presentations have the right timing not to be overwhelming or too short.
+
+It makes for a great supplement of the book because you can explore the topics more quickly and read the book if you need more detail on any area.
+
+Finally, I found the usage of tests and the accompanying GitHub project a killer feature as it illustrates the concepts crystal clear in a reproducible fashion and allows you to experiment with them on your own.”
+
+— José Luis Noriega
+
+“I found the High-Performance Java Persistence video course to be a comprehensive training and an excellent addition to the ebook.
+
+It is an effective way to get to the next stage of JPA knowledge.”
+
+— Zenko Turek
+
+[^7]: <https://courses.vladmihalcea.com/p/high-performance-java-persistence-mach-2?coupon_code=EBOOK33OFF>
+
+[^8]: <https://courses.vladmihalcea.com/p/high-performance-java-persistence-mach-2-online?coupon_code=EBOOK33OFF>
+
+[^9]: <https://courses.vladmihalcea.com/p/high-performance-java-persistence-mach-1/?coupon_code=EBOOK33OFF>
+
+[^10]: <https://courses.vladmihalcea.com/p/high-performance-java-persistence-mach-1-online?coupon_code=EBOOK33OFF>
+
+“Thanks a ton for the video series, Vlad Mihalcea.
+
+Not only this video course equips you to undertake day-to-day work, but it provides understanding and compliments you with reasons of what JPA means.”
+
+— Amitabh Mandal
+
+“With High-Performance Java Persistence Mach 1, Vlad takes us on a wonderful journey into the world of Java and databases.
+
+With videos, slides and a huge repositorya, Vlad guides us through the pitfalls of the different
+technologies and gives us lots of tips and tricks on our way that you would not find elsewhere.
+
+From a software developer’s perspective, I highly recommend High-Performance Java Persistence Mach 1. And best of all: the journey continues with Mach 2.”
+
+— Jean-Claude Brantschen
+
+ahttps://github.com/vladmihalcea/high-performance-java-persistence
+
+I JDBC and Database Essentials
