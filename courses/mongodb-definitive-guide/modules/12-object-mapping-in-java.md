@@ -96,6 +96,27 @@ Many Java projects use Spring Data MongoDB rather than the native driver. Unders
 
 To configure automatic POJO mapping with standard UUID representations in the Java Sync Driver:
 
+### 4.1 Visual Dataset & Codec Mapping Path Trace
+
+#### JVM Object State to Serialize:
+```java
+new User("Alice", "alice@gmail.com")
+```
+
+#### Step-by-Step Serialization Execution Path:
+
+1. **Driver Receives Object**:
+   * Application invokes `collection.insertOne(user)`.
+2. **Codec Registry Lookup**:
+   * Driver queries `pojoCodecRegistry` to find a codec for `User.class`.
+   * It scans `MongoClientSettings.getDefaultCodecRegistry()` -> no matching codec found.
+   * It queries `fromProviders(pojoProvider)` -> `PojoCodecProvider` matches class type and returns a dynamically constructed `PojoCodec<User>`.
+3. **Property Extraction**:
+   * The `PojoCodec` uses reflection to extract values by calling getters (`getName()` and `getEmail()`).
+4. **Binary BSON Write**:
+   * Driver translates values into binary key-value tuples and writes them to the database output stream.
+   * *Output BSON bytes schema*: `\x02name\x00\x06\x00\x00\x00Alice\x00\x02email\x00\x0f\x00\x00\x00alice@gmail.com\x00`
+
 ```java
 import static org.bson.codecs.configuration.CodecRegistries.fromProviders;
 import static org.bson.codecs.configuration.CodecRegistries.fromRegistries;
@@ -111,22 +132,24 @@ import org.bson.codecs.pojo.PojoCodecProvider;
 public class MongoPojoBootstrap {
 
     public static MongoClient createClient(String connectionString) {
-        // 1. Build the POJO Codec Provider configured for automatic class mapping
+        // 1. Build the POJO Codec Provider configured for automatic class mapping.
+        // automatic(true) enables dynamic creation of codecs for any Java Bean (POJO) encountered.
         PojoCodecProvider pojoProvider = PojoCodecProvider.builder()
                 .automatic(true)
                 .build();
 
-        // 2. Combine default codecs with the POJO codec registry
+        // 2. Combine default driver codecs (String, Double, Integer, etc.) with the POJO codec registry.
+        // fromRegistries executes lookups in the order registries are passed.
         CodecRegistry pojoCodecRegistry = fromRegistries(
                 MongoClientSettings.getDefaultCodecRegistry(),
                 fromProviders(pojoProvider)
         );
 
-        // 3. Build Client Settings configuring both registry and UUID representation
+        // 3. Build Client Settings configuring the custom registry and standard UUID bytes storage representation.
         MongoClientSettings settings = MongoClientSettings.builder()
                 .applyConnectionString(new ConnectionString(connectionString))
                 .codecRegistry(pojoCodecRegistry)
-                .uuidRepresentation(UuidRepresentation.STANDARD) // Store UUIDs as standard BSON subtype 0x04
+                .uuidRepresentation(UuidRepresentation.STANDARD) // Store UUIDs as standard cross-platform subtype 0x04
                 .build();
 
         // 4. Create and return client
@@ -134,6 +157,11 @@ public class MongoPojoBootstrap {
     }
 }
 ```
+
+#### Detailed Operations & Syntax Explanation:
+- **`PojoCodecProvider.builder().automatic(true)`**: Tells the driver to automatically generate codecs for standard Java classes using reflection, eliminating the need to register every POJO class explicitly.
+- **`CodecRegistries.fromRegistries`**: Combines multiple registries. The lookup processes left-to-right; therefore, standard driver types are matched first before evaluating user class shapes.
+- **`uuidRepresentation(UuidRepresentation.STANDARD)`**: Enforces standard cross-language BSON UUID representations (BSON subtype `0x04`) instead of language-specific byte orders.
 
 ---
 
@@ -182,6 +210,22 @@ public class MongoPojoBootstrap {
 ### 9.1 Raw Document Mapping (Manual approach)
 Below is an example of manual data transformation to highlight the boilerplate required compared to POJO codecs:
 
+##### Manual Document Mapping Trace:
+
+###### Input Domain Entity:
+```java
+new UserDomain("507f191e810c19729de860ea", "bob@gmail.com", 5)
+```
+
+###### Output Database BSON (Document):
+```json
+{
+  "_id": { "$oid": "507f191e810c19729de860ea" },
+  "user_email": "bob@gmail.com",
+  "login_count": 5
+}
+```
+
 ```java
 import org.bson.Document;
 import org.bson.types.ObjectId;
@@ -204,9 +248,11 @@ public class ManualUserMapper {
         public int getLoginCount() { return loginCount; }
     }
 
+    // Convert domain POJO to raw BSON Document
     public static Document toDocument(UserDomain user) {
         Document doc = new Document();
         if (user.getId() != null) {
+            // Converts standard 24-character hexadecimal String into database binary ObjectId
             doc.put("_id", new ObjectId(user.getId()));
         }
         doc.put("user_email", user.getEmail());
@@ -214,18 +260,39 @@ public class ManualUserMapper {
         return doc;
     }
 
+    // Convert raw BSON Document to domain POJO
     public static UserDomain fromDocument(Document doc) {
         ObjectId oid = doc.getObjectId("_id");
+        // Converts binary ObjectId back to 24-character hex String for APIs
         String idString = oid != null ? oid.toHexString() : null;
         String email = doc.getString("user_email");
+        // Uses getInteger with default value fallback to avoid NullPointerException on null fields
         int count = doc.getInteger("login_count", 0);
         return new UserDomain(idString, email, count);
     }
 }
 ```
 
+#### Detailed Operations & Syntax Explanation:
+- **`new ObjectId(String hexString)`**: Constructs a BSON `ObjectId` from a 24-character hexadecimal string, performing syntax validation.
+- **`doc.getObjectId("_id")`**: Extracts the binary BSON `_id` field as a Java `ObjectId` type.
+- **`doc.getInteger("fieldName", defaultValue)`**: Safe getter method that extracts integer values and returns a fallback value if the key does not exist or has a null value.
+
 ### 9.2 Complete POJO Mapping with Nested Objects and Lists
 The following entity class maps a complex schema including arrays and embedded child structures using standard BSON mappings:
+
+##### Nested Array BSON Dataset Layout:
+
+###### Output BSON/JSON Database State:
+```json
+{
+  "_id": { "$oid": "507f191e810c19729de860ea" },
+  "customer_name": "Alice Developer",
+  "items": [
+    { "productSku": "SKU-99", "price": 49.99 }
+  ]
+}
+```
 
 ```java
 import org.bson.codecs.pojo.annotations.BsonId;
@@ -236,15 +303,18 @@ import java.util.List;
 
 public class OrderEntity {
 
+    // @BsonId maps this field to the unique primary key "_id" in MongoDB
     @BsonId
     private ObjectId id;
 
+    // @BsonProperty customizes the key name written to the database document
     @BsonProperty("customer_name")
     private String customerName;
 
+    // Collections lists are automatically converted to BSON array wrappers
     private List<OrderItem> items = new ArrayList<>();
 
-    public OrderEntity() {} // Required nullary constructor
+    public OrderEntity() {} // Required nullaryDefault constructor for reflection
 
     public OrderEntity(ObjectId id, String customerName, List<OrderItem> items) {
         this.id = id;
@@ -261,12 +331,12 @@ public class OrderEntity {
     public List<OrderItem> getItems() { return items; }
     public void setItems(List<OrderItem> items) { this.items = items; }
 
-    // Nested Class
+    // Nested Class represents subdocuments embedded in the parent document array
     public static class OrderItem {
         private String productSku;
         private double price;
 
-        public OrderItem() {}
+        public OrderItem() {} // Default nullary constructor required for nested class serialization
 
         public OrderItem(String productSku, double price) {
             this.productSku = productSku;
@@ -282,21 +352,46 @@ public class OrderEntity {
 }
 ```
 
+#### Detailed Operations & Syntax Explanation:
+- **`@BsonId`**: Directs the serialization process to treat this field as the unique identifier.
+- **`@BsonProperty("customer_name")`**: Maps the camelCase Java property name to a snake_case database field key.
+- **`public static class OrderItem`**: Nested static subclasses are automatically mapped as subdocuments inside the parent BSON document.
+
 ### 9.3 Polymorphic Inheritance mapping with `@BsonDiscriminator`
 We use annotations to instruct the database how to map subclass types to the same collection:
+
+##### Polymorphic BSON Dataset Layout & Discriminator Trace:
+
+###### Output BSON/JSON Document for CreditCardPayment:
+```json
+{
+  "_id": { "$oid": "507f191e810c19729de860ea" },
+  "_t": "CREDIT_CARD",
+  "amount": 250.0,
+  "cardHolder": "Alice Developer",
+  "cardNumber": "1111-2222-3333-4444"
+}
+```
+
+###### Deserialization Resolution Path:
+1. Driver queries document from database.
+2. It encounters `_t` key matching the discriminator configured for `PaymentMethod`.
+3. The value `"CREDIT_CARD"` maps to the `CreditCardPayment` class definition.
+4. Driver instantiates a `CreditCardPayment` object, maps standard fields, and returns it cast as the abstract class `PaymentMethod`.
 
 ```java
 import org.bson.codecs.pojo.annotations.BsonDiscriminator;
 import org.bson.codecs.pojo.annotations.BsonId;
 import org.bson.types.ObjectId;
 
+// @BsonDiscriminator configures the discriminator key and value used during polymorphism
 @BsonDiscriminator(key = "_t", value = "PAYMENT")
 public abstract class PaymentMethod {
     @BsonId
     private ObjectId id;
     private double amount;
 
-    public PaymentMethod() {}
+    public PaymentMethod() {} // Nullary default constructor required
     public PaymentMethod(double amount) { this.amount = amount; }
 
     public ObjectId getId() { return id; }
@@ -305,6 +400,7 @@ public abstract class PaymentMethod {
     public void setAmount(double amount) { this.amount = amount; }
 }
 
+// Subclasses must also be annotated with @BsonDiscriminator defining their unique type value
 @BsonDiscriminator(key = "_t", value = "CREDIT_CARD")
 class CreditCardPayment extends PaymentMethod {
     private String cardHolder;
@@ -324,6 +420,9 @@ class CreditCardPayment extends PaymentMethod {
 }
 ```
 
+#### Detailed Operations & Syntax Explanation:
+- **`@BsonDiscriminator(key = "_t", value = "CREDIT_CARD")`**: Instructs the codec registry to append a field named `_t` storing the class type value during write serialization, and uses this field to resolve subclasses during queries.
+
 ---
 
 ## 10. Hands-on Exercises
@@ -331,8 +430,24 @@ class CreditCardPayment extends PaymentMethod {
 ### Exercise 1: Polymorphic Entity Mapping
 Define a polymorphic class hierarchy for vehicles. The base class must be abstract, use a discriminator key of `_t`, and declare sub-classes `Car` and `Truck`. Register these elements inside the provider context to enable seamless type-safe database queries.
 
-#### Implementation Stub
-Complete the missing annotations and registry components in the code below:
+##### Dataset and execution Trace:
+
+###### Input dataset shape for Car entity:
+```json
+{
+  "_id": { "$oid": "507f191e810c19729de860ea" },
+  "_t": "CAR",
+  "modelName": "Model S",
+  "passengerCapacity": 5
+}
+```
+
+###### Deserialization processing flow:
+1. `registry.get(Car.class)` parses BSON properties.
+2. Checks class annotations -> finds `@BsonDiscriminator(key = "_t", value = "CAR")`.
+3. Instantiates `Car` class through nullary Default constructor, mapping `modelName` and `passengerCapacity` values.
+
+Complete the implementation stub:
 
 ```java
 package com.mongodb.systems;
@@ -342,13 +457,14 @@ import org.bson.codecs.pojo.annotations.BsonId;
 import org.bson.codecs.pojo.annotations.BsonProperty;
 import org.bson.types.ObjectId;
 
-// TODO: Add discriminator annotations (key = "_t")
+// Configures base vehicle discriminator key
+@BsonDiscriminator(key = "_t", value = "VEHICLE")
 public abstract class Vehicle {
-    
+    @BsonId
     private ObjectId id;
     private String modelName;
 
-    public Vehicle() {}
+    public Vehicle() {} // Required nullary constructor
     public Vehicle(String modelName) {
         this.modelName = modelName;
     }
@@ -360,7 +476,8 @@ public abstract class Vehicle {
     public void setModelName(String modelName) { this.modelName = modelName; }
 }
 
-// TODO: Add discriminator annotations with value = "CAR"
+// Configures Car discriminator value
+@BsonDiscriminator(key = "_t", value = "CAR")
 public class Car extends Vehicle {
     private int passengerCapacity;
 
@@ -374,7 +491,8 @@ public class Car extends Vehicle {
     public void setPassengerCapacity(int capacity) { this.passengerCapacity = capacity; }
 }
 
-// TODO: Add discriminator annotations with value = "TRUCK"
+// Configures Truck discriminator value
+@BsonDiscriminator(key = "_t", value = "TRUCK")
 public class Truck extends Vehicle {
     private double payloadCapacity;
 
@@ -389,62 +507,35 @@ public class Truck extends Vehicle {
 }
 ```
 
-#### Verification Test
-Ensure your class structures pass this validation test suite:
-
-```java
-package com.mongodb.systems;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-import org.bson.codecs.configuration.CodecRegistries;
-import org.bson.codecs.configuration.CodecRegistry;
-import org.bson.codecs.pojo.PojoCodecProvider;
-import org.bson.codecs.pojo.annotations.BsonDiscriminator;
-import org.junit.jupiter.api.Test;
-
-class VehiclePolymorphismTest {
-
-    @Test
-    void testDiscriminatorAnnotations() {
-        // Assert base class is annotated
-        assertTrue(Vehicle.class.isAnnotationPresent(BsonDiscriminator.class), "Vehicle must have BsonDiscriminator");
-        BsonDiscriminator baseAnn = Vehicle.class.getAnnotation(BsonDiscriminator.class);
-        assertEquals("_t", baseAnn.key());
-
-        // Assert sub-classes are annotated
-        assertTrue(Car.class.isAnnotationPresent(BsonDiscriminator.class));
-        assertEquals("CAR", Car.class.getAnnotation(BsonDiscriminator.class).value());
-
-        assertTrue(Truck.class.isAnnotationPresent(BsonDiscriminator.class));
-        assertEquals("TRUCK", Truck.class.getAnnotation(BsonDiscriminator.class).value());
-    }
-
-    @Test
-    void testRegistryResolution() {
-        // Verify we can compile and register these POJOs inside the standard providers
-        PojoCodecProvider provider = PojoCodecProvider.builder()
-                .register(Vehicle.class, Car.class, Truck.class)
-                .build();
-        
-        CodecRegistry registry = CodecRegistries.fromRegistries(
-                org.mongodb.DriverDefaults.getDefaultCodecRegistry(),
-                CodecRegistries.fromProviders(provider)
-        );
-
-        assertNotNull(registry.get(Car.class));
-        assertNotNull(registry.get(Truck.class));
-    }
-}
-```
+#### Detailed Operations & Syntax Explanation:
+- **`@BsonDiscriminator(key = "_t", value = "VEHICLE")`**: Tells the POJO provider that the field `_t` stores class metadata for subclass resolution during operations.
 
 ---
 
 ### Exercise 2: Hex ID & UUID Mapping Service
 Implement an internal mapper that sits between a database `ProductEntity` (mapped using native BSON ObjectIds and binary UUID keys) and a network `ProductDto` (exposing only clean string values). Ensure proper validation checks are executed.
 
-#### Implementation Stub
-Implement the missing conversion routines:
+##### Dataset mapping Trace:
+
+###### Database ProductEntity State:
+```json
+{
+  "_id": { "$oid": "507f191e810c19729de860ea" },
+  "productUuid": { "$binary": { "base64": "A4...", "subType": "04" } },
+  "name": "Server Rack"
+}
+```
+
+###### ProductDto representation:
+```json
+{
+  "hexId": "507f191e810c19729de860ea",
+  "stringUuid": "4e7a83d3-1383-4a11-a8cf-3c32e1850125",
+  "name": "Server Rack"
+}
+```
+
+Complete the implementation stub:
 
 ```java
 package com.mongodb.systems;
@@ -496,7 +587,7 @@ public class ProductMapper {
         public void setName(String name) { this.name = name; }
     }
 
-    // TODO: Map Entity to DTO
+    // Map ProductEntity to ProductDto representation
     public static ProductDto toDto(ProductEntity entity) {
         if (entity == null) return null;
         String hexId = entity.getId() != null ? entity.getId().toHexString() : null;
@@ -504,12 +595,13 @@ public class ProductMapper {
         return new ProductDto(hexId, strUuid, entity.getName());
     }
 
-    // TODO: Map DTO to Entity with validation
+    // Map ProductDto to ProductEntity representation with syntax validations
     public static ProductEntity toEntity(ProductDto dto) {
         if (dto == null) return null;
         
         ObjectId oid = null;
         if (dto.getHexId() != null && !dto.getHexId().isEmpty()) {
+            // Validate that string is a valid 24-character hexadecimal ObjectId
             if (!ObjectId.isValid(dto.getHexId())) {
                 throw new IllegalArgumentException("Invalid Hex ID representation");
             }
@@ -518,6 +610,7 @@ public class ProductMapper {
 
         UUID uuid = null;
         if (dto.getStringUuid() != null && !dto.getStringUuid().isEmpty()) {
+            // Parses standard String UUID format into binary UUID representation
             uuid = UUID.fromString(dto.getStringUuid());
         }
 
@@ -526,16 +619,105 @@ public class ProductMapper {
 }
 ```
 
-#### Verification Test
-Run this validation test to assert your mappings are complete and correct:
+#### Detailed Operations & Syntax Explanation:
+- **`ObjectId.isValid(String hexString)`**: Validates if the string can be parsed into a 12-byte binary BSON ObjectId.
+- **`UUID.fromString(String uuidString)`**: Parses standard 36-character hyphenated UUID strings.
+
+---
+
+### Exercise 3: CodecRegistry Customizer
+Write a configuration utility that configures standard codec registries. The registry should enforce standard UUID representations, include the default codecs, and automatically build codecs for mapped entities.
+
+##### Registry Resolution Trace:
+1. Application queries `registry.get(SimplePojo.class)`.
+2. First registry `getDefaultCodecRegistry` returns no match.
+3. Second registry `fromProviders` queries `PojoCodecProvider`.
+4. `PojoCodecProvider` scans `SimplePojo` getters/setters and constructs a dynamic Codec mapper, returning success.
+
+Complete the implementation stub:
+
+```java
+package com.mongodb.systems;
+
+import static org.bson.codecs.configuration.CodecRegistries.fromProviders;
+import static org.bson.codecs.configuration.CodecRegistries.fromRegistries;
+
+import com.mongodb.MongoClientSettings;
+import org.bson.codecs.configuration.CodecRegistry;
+import org.bson.codecs.pojo.PojoCodecProvider;
+
+public class CustomRegistryFactory {
+
+    /**
+     * Builds a CodecRegistry configured with the default codecs and
+     * an automatic PojoCodecProvider.
+     */
+    public static CodecRegistry buildCustomRegistry() {
+        // Construct and return combined codec registries mapping POJOs automatically
+        return fromRegistries(
+            MongoClientSettings.getDefaultCodecRegistry(),
+            fromProviders(PojoCodecProvider.builder().automatic(true).build())
+        );
+    }
+}
+```
+
+---
+
+### Verification Tests
+
+Below is the JUnit 5 verification test suite. It runs tests on polymorphism mappings, UUID formatting conversions, and custom codec registries.
+
+#### Detailed Testing & Verification Explanation:
+*   **`Vehicle.class.isAnnotationPresent(BsonDiscriminator.class)`**: Asserts the class layout includes polymorphic metadata.
+*   **`registry.get(SimplePojo.class)`**: Verifies that the POJO provider constructs codecs at runtime.
 
 ```java
 package com.mongodb.systems;
 
 import static org.junit.jupiter.api.Assertions.*;
-import org.bson.types.ObjectId;
+
+import org.bson.codecs.configuration.CodecRegistries;
+import org.bson.codecs.configuration.CodecRegistry;
+import org.bson.codecs.pojo.PojoCodecProvider;
+import org.bson.codecs.pojo.annotations.BsonDiscriminator;
 import org.junit.jupiter.api.Test;
 import java.util.UUID;
+import org.bson.types.ObjectId;
+
+class VehiclePolymorphismTest {
+
+    @Test
+    void testDiscriminatorAnnotations() {
+        // Assert base class is annotated
+        assertTrue(Vehicle.class.isAnnotationPresent(BsonDiscriminator.class), "Vehicle must have BsonDiscriminator");
+        BsonDiscriminator baseAnn = Vehicle.class.getAnnotation(BsonDiscriminator.class);
+        assertEquals("_t", baseAnn.key());
+
+        // Assert sub-classes are annotated
+        assertTrue(Car.class.isAnnotationPresent(BsonDiscriminator.class));
+        assertEquals("CAR", Car.class.getAnnotation(BsonDiscriminator.class).value());
+
+        assertTrue(Truck.class.isAnnotationPresent(BsonDiscriminator.class));
+        assertEquals("TRUCK", Truck.class.getAnnotation(BsonDiscriminator.class).value());
+    }
+
+    @Test
+    void testRegistryResolution() {
+        // Verify we can compile and register these POJOs inside the standard providers
+        PojoCodecProvider provider = PojoCodecProvider.builder()
+                .register(Vehicle.class, Car.class, Truck.class)
+                .build();
+        
+        CodecRegistry registry = CodecRegistries.fromRegistries(
+                MongoClientSettings.getDefaultCodecRegistry(),
+                CodecRegistries.fromProviders(provider)
+        );
+
+        assertNotNull(registry.get(Car.class));
+        assertNotNull(registry.get(Truck.class));
+    }
+}
 
 class ProductMapperTest {
 
@@ -571,54 +753,6 @@ class ProductMapperTest {
         assertThrows(IllegalArgumentException.class, () -> ProductMapper.toEntity(dto));
     }
 }
-```
-
----
-
-### Exercise 3: CodecRegistry Customizer with UUID representation
-Write a configuration utility that configures standard codec registries. The registry should enforce standard UUID representations, include the default codecs, and automatically build codecs for mapped entities.
-
-#### Implementation Stub
-Complete the helper method to build the custom codec registry:
-
-```java
-package com.mongodb.systems;
-
-import static org.bson.codecs.configuration.CodecRegistries.fromProviders;
-import static org.bson.codecs.configuration.CodecRegistries.fromRegistries;
-
-import com.mongodb.MongoClientSettings;
-import org.bson.UuidRepresentation;
-import org.bson.codecs.configuration.CodecRegistry;
-import org.bson.codecs.pojo.PojoCodecProvider;
-
-public class CustomRegistryFactory {
-
-    /**
-     * Builds a CodecRegistry configured with the default codecs and
-     * an automatic PojoCodecProvider.
-     */
-    public static CodecRegistry buildCustomRegistry() {
-        // TODO: Construct and return the combined registry
-        return fromRegistries(
-            MongoClientSettings.getDefaultCodecRegistry(),
-            fromProviders(PojoCodecProvider.builder().automatic(true).build())
-        );
-    }
-}
-```
-
-#### Verification Test
-Run the JUnit 5 test class to verify settings correctness:
-
-```java
-package com.mongodb.systems;
-
-import static org.junit.jupiter.api.Assertions.*;
-
-import com.mongodb.MongoClientSettings;
-import org.bson.codecs.configuration.CodecRegistry;
-import org.junit.jupiter.api.Test;
 
 class CustomRegistryFactoryTest {
 

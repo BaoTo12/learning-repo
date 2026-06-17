@@ -8,9 +8,27 @@ Java developers rely on automatic memory management. However, at high throughput
 
 ## 1. Academic Lecture: The Mechanics of G1 GC
 
-Garbage collection engines rely on the **Generational Hypothesis**: the mathematical observation that the majority of allocated objects in software have a very short lifespan (temporary variables, short-lived buffers) and die shortly after allocation. 
+In languages like C or C++, memory management is manual. Developers must explicitly allocate (`malloc`) and deallocate (`free`) memory. Failing to free memory causes leaks; freeing too early causes dangling pointers and memory corruption.
 
-To exploit this, the JVM divides memory into the Young Generation (Eden, Survivor) and the Old Generation.
+Java resolves this using **Automatic Garbage Collection (GC)**. A background engine automatically traces and deletes unreachable objects.
+
+### The Three Foundational GC Algorithms
+Before exploring regional collectors like G1, we must understand the three core mechanisms used to reclaim memory:
+
+1.  **Mark-Sweep**:
+    *   *Mechanism*: The collector traverses the object reference graph starting from GC Roots, marking all reachable objects as "live" (Mark Phase). Then, it sweeps through the heap, adding all unmarked memory addresses back to a free-list (Sweep Phase).
+    *   *Trade-off*: Easy to implement, but leaves memory highly fragmented. This makes subsequent allocations slow, as the JVM must search a free-list for a big enough gap instead of using a simple bump-the-pointer operation.
+2.  **Mark-Copy**:
+    *   *Mechanism*: The heap is split into two equal halves (semi-spaces). The collector marks live objects in the active half, then copies them contiguously to the second half, leaving no gaps. It then invalidates the entire first half at once.
+    *   *Trade-off*: Extremely fast allocation (simple pointer bump) and zero fragmentation. However, it requires double the memory footprint, as half of the space must remain empty to receive copies. (This is why Eden and Survivor spaces are split).
+3.  **Mark-Compact**:
+    *   *Mechanism*: The collector marks live objects, then sweeps through the heap and slides all live objects to one end of the memory space (Compaction Phase), creating a contiguous block of free space.
+    *   *Trade-off*: Eliminates fragmentation and utilizes the entire memory space without doubling memory requirements. However, it is slow and CPU-intensive, as it requires moving objects in memory and updating all reference pointers pointing to their new locations.
+
+### The Generational Hypothesis
+Traditional collectors apply these three algorithms by splitting the heap into logical zones based on the **Generational Hypothesis**: the mathematical observation that the majority of allocated objects in software have a very short lifespan (temporary variables, short-lived buffers) and die shortly after allocation. 
+
+To exploit this, the JVM divides memory into the Young Generation (Eden, Survivor) where Mark-Copy is used because survival rates are low, and the Old Generation where Mark-Sweep-Compact is used because objects survive longer.
 
 ### The G1 Regional Layout
 

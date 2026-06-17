@@ -8,9 +8,23 @@ Many developers believe that Java is slow because it is "interpreted." In modern
 
 ## 1. Academic Lecture: The Tiered Compiler Architecture
 
-When the JVM boots, it starts in **Interpreted Mode** (Level 0). The JVM reads bytecode instruction-by-instruction and translates it to machine commands. 
+To write high-performance Java applications, we must understand how Java executes code. There are two primary paradigms of code execution: **Interpretation** and **Compilation**.
 
-As code runs, the JVM counts method invocations and loop backedges. When counts exceed thresholds, the JVM initiates **Tiered Compilation**, transitioning code through 5 compilation levels:
+*   **Interpreter**: Reads bytecode instructions one-by-one and translates them into machine commands at runtime. 
+    *   *Pros*: Zero startup delay. The program runs immediately.
+    *   *Cons*: Slow execution. Every loop iteration requires re-parsing the same instructions.
+*   **Compiler**: Translates a large block of code (or the whole program) into native machine instructions once.
+    *   *Pros*: Maximum execution speed.
+    *   *Cons*: Delayed execution. The compilation process takes time.
+
+### How the JIT Compiler works
+The JVM combines both approaches to achieve maximum performance. When the JVM boots, it starts in **Interpreted Mode** (Level 0). As the application runs:
+1.  **Profiling**: The JVM execution engine keeps count of how many times each method is called and how many times loops branch back (backedges).
+2.  **JIT Compilation**: If a method is executed frequently (e.g. 10,000 times), it is designated as a **"hot path."** A background JIT compiler thread compiles the method's bytecode into native machine code.
+3.  **Code Cache**: The compiled native assembly code is saved in a dedicated off-heap memory region called the **Code Cache**.
+4.  **Pointer Swap**: The JVM swaps the execution pointer of the method to point to the compiled machine code in the Code Cache. Future invocations run at native CPU speed without interpreter overhead.
+
+In modern JVMs, this transition is managed through a multi-tiered architecture called **Tiered Compilation**, which transitions code through 5 compilation levels:
 
 ```
 [ L0: Interpreted ] ---> [ L3: C1 Compiler (with Profiling) ] ---> [ L4: C2 Compiler (Full Optimization) ]

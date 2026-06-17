@@ -39,7 +39,350 @@ graph TD
 
 ---
 
-## 2. Theory vs. Production Trade-offs
+## 2. API Mapping: Raw MongoDB Java Driver vs. Spring Data MongoDB
+
+When migrating from raw MongoDB Java development or comparing it to the Spring Data ecosystem, you will find a similar paradigm shift as moving from JDBC/JPA to Spring Data JPA. Below is the comprehensive structural mapping:
+
+### A. Conceptual Mapping Matrix
+
+| Feature / Concept | Raw MongoDB Java Driver (Sync) | Spring Data MongoDB (MongoTemplate & Repositories) |
+| :--- | :--- | :--- |
+| **Config & Client Initialization** | Manual `MongoClient` setup via URI, database and collection access blocks. | Declarative `AbstractMongoClientConfiguration` bean configurations & `@EnableMongoAuditing`. |
+| **Document Schema & POJO mapping** | Raw BSON `Document` mappings or reflection-based registries via `PojoCodecProvider`. | Declarative POJO entities annotated with `@Document`, `@Id`, `@Field`, and `@Version`. |
+| **Query Filters** | BSON `Filters` builder helper factory (e.g. `Filters.eq()`, `Filters.and()`). | Spring's Criteria query context (`Criteria.where("key").is()`) inside a `Query` model. |
+| **Data Modifications (Updates)** | BSON `Updates` builder helper factory (e.g. `Updates.set()`, `Updates.inc()`). | Spring's `Update` fluent modifier query API (`new Update().set().inc()`). |
+| **Aggregations** | Static helper pipeline arrays compiled via `Aggregates` and `Accumulators` classes. | Type-safe `Aggregation` pipeline stages (`Aggregation.match()`, `Aggregation.group()`). |
+| **Logical Transactions** | Manually managed `ClientSession` try-with-resources with manual commits and aborts. | Declarative transactional proxy boundaries utilizing standard Spring `@Transactional`. |
+
+---
+
+### B. Side-by-Side Architectural Code Mappings
+
+#### 1. Configuration & Connection Setup
+* **Raw Java Driver**: Handles driver initialization and connection pools directly in standard static blocks or manual lifecycle beans.
+* **Spring Data MongoDB**: Managed by the container. Properties are read from `application.yml` and injected directly into `MongoTemplate`.
+
+```java
+// === RAW JAVA DRIVER CONNECTION SETUP ===
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoDatabase;
+import com.mongodb.client.MongoCollection;
+import org.bson.Document;
+
+public class NativeMongoConnection {
+    private static final MongoClient mongoClient = MongoClients.create("mongodb://localhost:27017");
+    
+    public static MongoCollection<Document> getCollection(String collectionName) {
+        MongoDatabase database = mongoClient.getDatabase("mastery_db");
+        return database.getCollection(collectionName);
+    }
+}
+```
+
+```java
+// === SPRING DATA CONFIGURATION CONFIG ===
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.data.mongodb.config.AbstractMongoClientConfiguration;
+
+@Configuration
+public class SpringMongoConfig extends AbstractMongoClientConfiguration {
+    @Override
+    protected String getDatabaseName() {
+        return "mastery_db";
+    }
+
+    @Override
+    public MongoClient mongoClient() {
+        return MongoClients.create("mongodb://localhost:27017");
+    }
+    // Spring boot automatically exposes a MongoTemplate bean using this client configuration
+}
+```
+
+---
+
+#### 2. Entity Modeling & Conversion
+* **Raw Java Driver**: Relies on raw BSON mappings or configures a complex reflection-based `CodecRegistry` to automatically serialize and deserialize POJOs.
+* **Spring Data MongoDB**: Uses standard Spring annotations. Spring's mapping context reads these properties to handle type conversions and primary key mapping automatically.
+
+```java
+// === RAW JAVA DRIVER POJO REGISTRY CONFIG ===
+import com.mongodb.MongoClientSettings;
+import com.mongodb.client.MongoCollection;
+import org.bson.codecs.configuration.CodecRegistry;
+import org.bson.codecs.pojo.PojoCodecProvider;
+import static org.bson.codecs.configuration.CodecRegistries.fromProviders;
+import static org.bson.codecs.configuration.CodecRegistries.fromRegistries;
+
+public class NativePojoMapping {
+    public static MongoCollection<Customer> getCustomerCollection() {
+        CodecRegistry pojoCodecRegistry = fromRegistries(
+            MongoClientSettings.getDefaultCodecRegistry(),
+            fromProviders(PojoCodecProvider.builder().automatic(true).build())
+        );
+        return NativeMongoConnection.getCollection("customers")
+                .withCodecRegistry(pojoCodecRegistry)
+                .withDocumentClass(Customer.class);
+    }
+}
+```
+
+```java
+// === SPRING DATA ENTITY DECLARATION ===
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.Version;
+import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.core.mapping.Field;
+import java.util.List;
+
+@Document(collection = "customers")
+public class Customer {
+    @Id
+    private String id; // Automatically maps to MongoDB's ObjectId _id field
+
+    @Field("full_name")
+    private String name;
+
+    private int age;
+    private List<String> roles;
+
+    @Version
+    private Long version; // Optimistic locking mechanism managed by Spring
+}
+```
+
+---
+
+#### 3. Find & Query Filters
+* **Raw Java Driver**: Queries are defined using static helper utility methods in `Filters`, `Projections`, and `Sorts` models.
+* **Spring Data MongoDB**: Expressed via Spring's chainable `Criteria` builder. Results are bound to POJOs, records, or projection interfaces automatically.
+
+```java
+// === RAW JAVA DRIVER FILTER QUERY ===
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Projections;
+import com.mongodb.client.model.Sorts;
+import org.bson.conversions.Bson;
+import java.util.ArrayList;
+import java.util.List;
+
+public List<Document> queryNativeCustomers() {
+    Bson filter = Filters.and(
+        Filters.eq("status", "ACTIVE"),
+        Filters.gte("age", 21)
+    );
+    Bson projection = Projections.fields(
+        Projections.include("name", "email"),
+        Projections.excludeId()
+    );
+    Bson sort = Sorts.descending("age");
+
+    List<Document> list = new ArrayList<>();
+    NativeMongoConnection.getCollection("customers")
+        .find(filter)
+        .projection(projection)
+        .sort(sort)
+        .limit(10)
+        .into(list);
+    return list;
+}
+```
+
+```java
+// === SPRING DATA TEMPLATE & REPOSITORY QUERIES ===
+import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.repository.MongoRepository;
+import java.util.List;
+
+// Approach A: MongoTemplate Criteria API
+public List<CustomerProjection> querySpringCustomers(MongoTemplate mongoTemplate) {
+    Query query = new Query();
+    query.addCriteria(Criteria.where("status").is("ACTIVE").and("age").gte(21));
+    query.fields().include("name").include("email").exclude("id");
+    query.with(Sort.by(Sort.Direction.DESC, "age"));
+    query.limit(10);
+
+    return mongoTemplate.find(query, Customer.class, CustomerProjection.class);
+}
+
+// Approach B: Declarative Query Repository
+public interface CustomerRepository extends MongoRepository<Customer, String> {
+    @org.springframework.data.mongodb.repository.Query(
+        value = "{ 'status': 'ACTIVE', 'age': { '$gte': ?0 } }", 
+        fields = "{ 'name': 1, 'email': 1, '_id': 0 }"
+    )
+    List<CustomerProjection> findActiveCustomers(int minAge, Sort sort);
+}
+```
+
+---
+
+#### 4. Modifications & In-place Updates
+* **Raw Java Driver**: Modifying specific fields without loading the entity is handled via `Updates` combined with a query filter.
+* **Spring Data MongoDB**: Uses `Update` class modifications executed through `MongoTemplate.updateFirst()` or `updateMulti()`.
+
+```java
+// === RAW JAVA DRIVER IN-PLACE UPDATE ===
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Updates;
+import org.bson.conversions.Bson;
+import org.bson.types.ObjectId;
+
+public void updateNativeCustomer(String customerId) {
+    Bson filter = Filters.eq("_id", new ObjectId(customerId));
+    Bson update = Updates.combine(
+        Updates.set("status", "VIP"),
+        Updates.inc("points", 15),
+        Updates.push("history", "Upgraded via native driver")
+    );
+    NativeMongoConnection.getCollection("customers").updateOne(filter, update);
+}
+```
+
+```java
+// === SPRING DATA IN-PLACE UPDATE ===
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
+
+public void updateSpringCustomer(MongoTemplate mongoTemplate, String customerId) {
+    Query query = Query.query(Criteria.where("id").is(customerId));
+    Update update = new Update()
+        .set("status", "VIP")
+        .inc("points", 15)
+        .push("history", "Upgraded via Spring Data");
+        
+    mongoTemplate.updateFirst(query, update, Customer.class);
+}
+```
+
+---
+
+#### 5. Aggregation Pipelines
+* **Raw Java Driver**: Pipelines are created as lists of BSON aggregation documents, using `Aggregates` and `Accumulators` helpers.
+* **Spring Data MongoDB**: Pipelines are constructed dynamically using Spring's fluent `Aggregation` API, which enforces type safety on mappings.
+
+```java
+// === RAW JAVA DRIVER AGGREGATION ===
+import com.mongodb.client.model.Accumulators;
+import com.mongodb.client.model.Aggregates;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Sorts;
+import org.bson.conversions.Bson;
+import java.util.ArrayList;
+import java.util.List;
+
+public List<Document> runNativeAggregation() {
+    List<Bson> pipeline = List.of(
+        Aggregates.match(Filters.eq("status", "ACTIVE")),
+        Aggregates.group("$country", 
+            Accumulators.sum("totalCount", 1),
+            Accumulators.avg("averageAge", "$age")
+        ),
+        Aggregates.sort(Sorts.descending("totalCount"))
+    );
+    
+    List<Document> list = new ArrayList<>();
+    NativeMongoConnection.getCollection("customers").aggregate(pipeline).into(list);
+    return list;
+}
+```
+
+```java
+// === SPRING DATA AGGREGATION ===
+import org.springframework.data.domain.Sort;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationResults;
+import org.springframework.data.mongodb.core.query.Criteria;
+import java.util.List;
+
+public List<CountrySummary> runSpringAggregation(MongoTemplate mongoTemplate) {
+    Aggregation agg = Aggregation.newAggregation(
+        Aggregation.match(Criteria.where("status").is("ACTIVE")),
+        Aggregation.group("country")
+            .count().as("totalCount")
+            .avg("age").as("averageAge"),
+        Aggregation.sort(Sort.Direction.DESC, "totalCount")
+    );
+
+    AggregationResults<CountrySummary> results = mongoTemplate.aggregate(
+        agg, Customer.class, CountrySummary.class
+    );
+    return results.getMappedResults();
+}
+```
+
+---
+
+#### 6. Transaction Management
+* **Raw Java Driver**: Requires starting a session and managing transaction blocks manually within try-catch blocks to guarantee rollback on errors.
+* **Spring Data MongoDB**: Uses Spring's transaction support via `@Transactional` annotations on services, relying on the `MongoTransactionManager` to automatically coordinate driver sessions.
+
+```java
+// === RAW JAVA DRIVER TRANSACTION ===
+import com.mongodb.client.ClientSession;
+import com.mongodb.client.model.Filters;
+import com.mongodb.client.model.Updates;
+import org.bson.Document;
+
+public void processNativeTransaction(Document orderDoc, String itemId, int qty) {
+    try (ClientSession session = NativeMongoConnection.mongoClient.startSession()) {
+        session.startTransaction();
+        try {
+            NativeMongoConnection.getCollection("orders").insertOne(session, orderDoc);
+            NativeMongoConnection.getCollection("inventory").updateOne(
+                session,
+                Filters.eq("_id", itemId),
+                Updates.inc("stock", -qty)
+            );
+            session.commitTransaction();
+        } catch (Exception e) {
+            session.abortTransaction();
+            throw e;
+        }
+    }
+}
+```
+
+```java
+// === SPRING DATA DECLARATIVE TRANSACTION ===
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class OrderService {
+    private final MongoTemplate mongoTemplate;
+
+    public OrderService(MongoTemplate mongoTemplate) {
+        this.mongoTemplate = mongoTemplate;
+    }
+
+    @Transactional
+    public void placeOrder(Order order, String itemId, int qty) {
+        mongoTemplate.insert(order);
+        
+        Query query = Query.query(Criteria.where("id").is(itemId));
+        Update update = new Update().inc("stock", -qty);
+        mongoTemplate.updateFirst(query, update, Inventory.class);
+    }
+}
+```
+
+---
+
+## 3. Theory vs. Production Trade-offs
 
 Compare data mapping options:
 
@@ -51,7 +394,7 @@ Compare data mapping options:
 
 ---
 
-## 3. How to Use: Configuring Custom Converters in Spring
+## 4. How to Use: Configuring Custom Converters in Spring
 
 Let us configure Spring Data. We contrast a default, un-optimized config (saving class metadata) with a hardened configuration that registers custom converters and disables the `_class` field.
 
@@ -148,7 +491,7 @@ public class MongoConfig {
 
 ---
 
-## 4. Common Errors & Pitfalls
+## 5. Common Errors & Pitfalls
 
 ### Pitfall 1: Non-Blocking Context Violations in Auditing
 *   **Why it fails**: When using Reactive Spring Data, auditing requires fetching the user context asynchronously (e.g. from reactive Spring Security). If you implement auditing using blocking operations (like querying a database on the main thread), you block the Netty event loop, crashing application throughput.
@@ -156,7 +499,7 @@ public class MongoConfig {
 
 ---
 
-## 5. Socratic Review Questions
+## 6. Socratic Review Questions
 
 ### Question 1
 Why does Spring Data MongoDB require custom converter classes to handle timezone-aware date objects?
@@ -164,9 +507,15 @@ Why does Spring Data MongoDB require custom converter classes to handle timezone
 #### Answer
 The standard BSON date specification maps dates to UTC Unix milliseconds since the epoch, which does not store timezone offsets. If you insert a Java `ZonedDateTime` directly, the driver discards the timezone metadata and stores only the UTC time. When read back, the timezone defaults to the server's local zone. Writing custom converters to store dates as nested documents (holding the timestamp and the timezone ID) preserves the timezone offset.
 
+### Question 2
+Under what circumstances might you bypass the Spring Data MongoDB mapper and write raw BSON queries or use the native MongoClient client library in an enterprise Spring Boot application?
+
+#### Answer
+For performance-critical tasks like streaming bulk inserts of millions of records (bypassing Spring's `MappingMongoConverter` reflection overhead), or when utilizing advanced server features not yet natively mapped by the Spring Data repository layers (e.g. specialized administrative operations or specific Atlas Search configuration hooks). Spring's `MongoTemplate` enables this escape hatch via `mongoTemplate.execute(db -> ...)` or `mongoTemplate.getCollection(...)` to run native driver operations while reusing the connection pool and transaction context.
+
 ---
 
-## 6. Hands-on Challenge: Custom Document Converter
+## 7. Hands-on Challenge: Custom Document Converter
 
 ### The Challenge
 In this challenge, you will implement a custom Spring Data Converter to handle a value object.

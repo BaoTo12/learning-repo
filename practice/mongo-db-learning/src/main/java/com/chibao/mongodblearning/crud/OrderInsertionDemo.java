@@ -1,4 +1,4 @@
-package com.chibao.mongodblearning;
+package com.chibao.mongodblearning.crud;
 
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.InsertManyOptions;

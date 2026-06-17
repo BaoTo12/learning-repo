@@ -10,20 +10,21 @@ In this course, we will study **generative memory models, G1 & ZGC internal mech
 
 ## Course Syllabus & Navigation
 
-The course is divided into 10 detailed modules and a final capstone diagnostics challenge:
+The course is divided into 11 detailed modules and a final capstone diagnostics challenge:
 
 | Module | Core Classification | Focus Topics |
 | :--- | :--- | :--- |
-| **01** | [JVM Architecture & Memory Model](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/01-jvm-architecture-memory-model.md) | Metaspace, Stack vs. Heap, TLABs, PLABs, JMM happens-before, and CPU cache False Sharing. |
-| **02** | [G1 GC Mechanics & Foundations](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/02-garbage-collection-foundations-g1.md) | Generational hypothesis, mark-sweep-compact, G1 regions, Remembered Sets, Card Tables, and Humongous allocations. |
-| **03** | [Modern Low-Latency GCs](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/03-modern-low-latency-gcs.md) | ZGC and Shenandoah, load barriers, colored pointers, concurrent compaction, and thread handshakes. |
-| **04** | [GC Log Analysis & Diagnostics](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/04-gc-log-analysis-diagnostics.md) | Unified JVM Logging configurations, GC log parsing, throughput, promotion, and allocation rates. |
-| **05** | [Memory Profiling & Heap Dumps](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/05-memory-profiling-heap-dumps.md) | Heap dump generation, MAT leak suspects, GC roots, and object memory header layouts (Mark Word, OOPs). |
-| **06** | [CPU Profiling & Flame Graphs](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/06-cpu-profiling-execution-analysis.md) | Sampling vs. Instrumentation, Async Profiler execution, Flame Graphs, and JProfiler call trees. |
-| **07** | [JIT Compilation & Code Cache](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/07-jit-compilation-code-cache.md) | Tiered Compilation (C1/C2), Escape Analysis, Scalar Replacement, Inlining, and disassembly inspect. |
-| **08** | [Synchronization & Thread Dumps](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/08-multithreading-synchronization-performance.md) | Monitor contention (biased/inflated locks), lock elision, coarsening, thread dump analysis, and deadlocks. |
-| **09** | [Off-Heap Memory & Native Tracking](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/09-off-heap-memory-direct-buffers.md) | Direct ByteBuffers, Panama Foreign Memory API, Unsafe, and Native Memory Tracking (NMT) diagnostics. |
-| **10** | [Final Capstone Project](file:///c:/Users/Admin/Desktop/projects/learning-repo/jvm-performance-engineering/modules/10-final-capstone-performance-optimization.md) | Diagnosing, profiling, and optimizing a high-latency, leaking server to meet target SLA metrics. |
+| **00** | [JVM Fundamentals](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/00-jvm-fundamentals-class-loading-bytecode.md) | Class Loading subsystem, Bytecode disassembling, Stack vs. Heap, sizing flags, OOMs, and JDK CLI diagnostics. |
+| **01** | [JVM Architecture & Memory Model](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/01-jvm-architecture-memory-model.md) | Metaspace, Stack vs. Heap recap, TLABs, PLABs, JMM happens-before, and CPU cache False Sharing. |
+| **02** | [G1 GC Mechanics & Foundations](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/02-garbage-collection-foundations-g1.md) | Generational hypothesis, GC algorithms (Mark-Sweep/Copy/Compact), G1 regions, Remembered Sets, Card Tables, and Humongous allocations. |
+| **03** | [Modern Low-Latency GCs](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/03-modern-low-latency-gcs.md) | ZGC and Shenandoah, load barriers, colored pointers, concurrent compaction, and thread handshakes. |
+| **04** | [GC Log Analysis & Diagnostics](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/04-gc-log-analysis-diagnostics.md) | Unified JVM Logging configurations, raw log dissection, throughput, promotion, and allocation rates. |
+| **05** | [Memory Profiling & Heap Dumps](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/05-memory-profiling-heap-dumps.md) | Heap dump generation, Shallow vs. Retained Size, GC Roots, object layout, and MAT leak suspects. |
+| **06** | [CPU Profiling & Flame Graphs](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/06-cpu-profiling-execution-analysis.md) | Sampling vs. Instrumentation, Async Profiler execution, Flame Graphs, and JProfiler call trees. |
+| **07** | [JIT Compilation & Code Cache](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/07-jit-compilation-code-cache.md) | Interpreter vs. compiler, Tiered Compilation (C1/C2), Escape Analysis, Scalar Replacement, Inlining, and disassembly inspect. |
+| **08** | [Synchronization & Thread Dumps](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/08-multithreading-synchronization-performance.md) | Thread states, monitors, lock contention (biased/inflated locks), lock elision, coarsening, thread dump analysis, and deadlocks. |
+| **09** | [Off-Heap Memory & Native Tracking](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/09-off-heap-memory-direct-buffers.md) | Direct ByteBuffers, Panama Foreign Memory API, Unsafe, and Native Memory Tracking (NMT) diagnostics. |
+| **10** | [Final Capstone Project](file:///c:/Users/Admin/Desktop/projects/learning-repo/courses/java/jvm-performance-engineering/modules/10-final-capstone-performance-optimization.md) | Diagnosing, profiling, and optimizing a high-latency, leaking server to meet target SLA metrics. |
 
 ---
 

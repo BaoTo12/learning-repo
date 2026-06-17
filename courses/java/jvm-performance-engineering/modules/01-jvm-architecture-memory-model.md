@@ -8,7 +8,13 @@ At senior engineering levels, performance optimization requires looking beyond t
 
 ## 1. Academic Lecture: The Physical Layout of JVM Memory
 
-The JVM is an abstract stack-based execution engine. At runtime, the operating system allocates a single virtual process space to the JVM, which partitions it into distinct memory zones:
+Before we dive into low-level CPU cache lines and memory barriers, let us establish the fundamental dividing line of JVM memory: **Stack vs. Heap**.
+
+### Stack vs. Heap Recap:
+*   **Thread Stack**: Every thread has its own private execution stack. Every time a method is called, a new **Stack Frame** is pushed. This frame holds local primitive variables and reference pointers. It is thread-confined, runs in L1/L2 cache, and has zero lock contention.
+*   **Java Heap**: The shared pool of memory where all object instances are created. Objects can be accessed by any thread holding a reference. Because it is shared, allocating objects on the Heap requires coordination among all threads, which introduces synchronization bottlenecks.
+
+At runtime, the operating system allocates a single virtual process space to the JVM, which partitions it into distinct memory zones:
 
 ```
 +-------------------------------------------------------------------------+

@@ -8,10 +8,26 @@ In concurrent programming, synchronization guarantees safety, but it can introdu
 
 ## 1. Academic Lecture: The Mechanics of JVM Locks
 
-To coordinate thread execution, every object in Java has a **Monitor** associated with it. When a thread executes a `synchronized` block, it attempts to acquire this monitor.
+To build high-performance concurrent systems, we must first understand how Java manages threads and coordinate synchronization.
+
+### Java Thread States
+At any point in time, a Java thread exists in one of the following states (as defined in the `java.lang.Thread.State` enum):
+*   **`NEW`**: The thread has been instantiated, but `start()` has not yet been called.
+*   **`RUNNABLE`**: The thread is actively executing in the JVM, or is waiting for CPU allocation from the operating system scheduler.
+*   **`BLOCKED`**: The thread is suspended, waiting to enter or re-enter a `synchronized` block because another thread holds the lock monitor.
+*   **`WAITING`**: The thread has paused indefinitely, waiting for an explicit signal from another thread (e.g. via `Object.wait()`, `Thread.join()`, or `LockSupport.park()`).
+*   **`TIMED_WAITING`**: The thread has paused for a specific duration (e.g. via `Thread.sleep(ms)`, `Object.wait(ms)`, or `LockSupport.parkNanos()`).
+*   **`TERMINATED`**: The thread has completed its execution block.
+
+### Monitors and the `synchronized` Keyword
+In Java, synchronization is built around an internal entity called the **Monitor** (or intrinsic lock). 
+*   **Every Java object has an implicit Monitor.**
+*   When a thread enters a synchronized block (e.g., `synchronized(myObject) { ... }`), it must acquire ownership of `myObject`'s monitor.
+*   If another thread holds that monitor, the acquiring thread is put into the **`BLOCKED`** state and suspended by the OS scheduler, avoiding CPU spin loops but incurring context-switch latency.
+
+The state of an object's monitor is stored inside the object's memory header, specifically in its **Mark Word**.
 
 ### Lock Escalation in HotSpot
-
 Acquiring a heavyweight operating system lock requires an OS context switch, which is CPU-expensive. To avoid this, HotSpot escalates lock intensity progressively:
 
 ```

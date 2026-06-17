@@ -28,28 +28,54 @@ To capture memory state automatically when the JVM crashes due to memory exhaust
 
 ### Analyzing Dumps: Shallow vs. Retained Size
 
-When loading a heap dump into analyzer tools like JProfiler or Eclipse MAT, the engine calculates two size metrics for every object:
-*   **Shallow Size**: The memory consumed by the object itself (its fields and object header). It does not include the memory of referenced objects.
-*   **Retained Size**: The total memory that would be freed if this specific object were garbage collected. It is the sum of the object's shallow size plus the size of all referenced objects that are reachable *only* through this object.
+When loading a heap dump into analyzer tools, the engine computes two critical memory dimensions for every object:
 
+*   **Shallow Size**: The memory consumed directly by the object itself in the heap. This includes its object header (typically 12 or 16 bytes), primitive fields (e.g., a 4-byte `int`, an 8-byte `double`), and reference pointers to other objects (4 bytes under compressed OOPs, or 8 bytes). It does **not** include the memory of the objects it references.
+*   **Retained Size**: The total memory footprint that would be freed from the heap if this specific object were garbage collected. It is the sum of this object's shallow size plus the shallow sizes of all descendant objects that are reachable **only** via this object.
+
+Let us analyze two scenarios to make the difference clear:
+
+#### Scenario A: Exclusive Ownership
+Object A references B and C. No other objects in the entire heap reference B or C.
 ```
-                  Retained Size Hierarchy
-                  
-                       [ Object A ] (Shallow: 32 bytes)
-                        /        \
-                       v          v
-             [ Object B ]        [ Object C ] (Shallow: 64 bytes)
-             (Shallow: 48 bytes)
-             
-    * Retained Size of A = Shallow(A) + Shallow(B) + Shallow(C) = 144 bytes.
+         [ Object A ] (Shallow: 32 bytes)
+          /        \
+         v          v
+   [ Object B ]    [ Object C ] (Shallow: 64 bytes)
+   (Shallow: 48B)
 ```
+*   **Shallow(A)** = 32 bytes
+*   **Retained(A)** = Shallow(A) + Shallow(B) + Shallow(C) = 32 + 48 + 64 = **144 bytes**.
+*   *Why*: If A is collected, B and C become unreachable and will also be deleted.
+
+#### Scenario B: Shared Reference (Crucial Nuance)
+Object A references B and C, but B is also referenced by an independent Object D.
+```
+   [ Object D ]       [ Object A ] (Shallow: 32 bytes)
+         \             /        \
+          v           v          v
+        [ Object B ]    [ Object C ] (Shallow: 64 bytes)
+        (Shallow: 48B)
+```
+*   **Shallow(A)** = 32 bytes
+*   **Retained(A)** = Shallow(A) + Shallow(C) = 32 + 64 = **96 bytes**.
+*   *Why*: If A is collected, B is still kept alive by D. B will not be reclaimed, so its 48 bytes are excluded from A's retained footprint.
+
+---
 
 ### Locating GC Roots
-An object is kept alive in memory as long as it is reachable via a chain of references starting from a **GC Root**. If an object is not reachable from any root, the garbage collector reclaims it.
-Types of GC Roots include:
-*   **Thread Stacks**: Local variables and parameters inside active method execution frames.
-*   **Static Variables**: Reference fields defined inside loaded class metadata.
-*   **JNI Handles**: Java objects referenced by native C/C++ libraries.
+
+How does the Garbage Collector know what is "alive"? It uses **GC Roots**.
+
+> [!TIP]
+> **The Balloon Analogy**: Imagine all objects in the heap as floating balloons, and references as strings connecting them. The **GC Roots** are the hands anchoring the balloons from the ground. If you cut all strings holding a balloon to the ground (i.e. no connection to any GC Root), the balloon floats away—which means it is unreachable, and the GC will pop (reclaim) it.
+
+An object is kept alive only if there is an active chain of references leading back to a GC Root. The primary categories of GC Roots are:
+
+1.  **Thread Stacks (Local Variables)**: Any reference or parameter residing in a local stack frame of a running thread. As long as that thread is executing the method, the referenced heap objects are live.
+2.  **Static Variables**: Fields marked `static` in loaded classes. These are stored in Metaspace and are treated as roots because static variables live for the duration of the defining ClassLoader's lifecycle.
+3.  **JNI (Java Native Interface) References**: Java objects passed to native C or C++ methods or allocated globally by the native JNI code.
+4.  **JVM Internals (System Roots)**: Core system classes (like `java.lang.System`), threads, and objects residing in the JVM's system dictionary.
 
 ### The Physical Memory Layout of Java Objects
 

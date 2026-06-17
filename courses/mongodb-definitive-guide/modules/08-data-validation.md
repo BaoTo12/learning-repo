@@ -33,31 +33,84 @@ MongoDB provides database-level JSON Schema validation to:
 ---
 
 ## 4. How do we use it in Java?
-We define validation rules using BSON `Document` structures representing a `$jsonSchema` document. We pass this document to a collection using `CreateCollectionOptions` or update it dynamically on an existing collection via the `collMod` admin command.
+
+To enforce data validation in MongoDB using Java, we construct a JSON Schema document and register it with the database when creating a collection or altering an existing one.
+
+### 4.1 Understanding the Java Validation API
+
+The MongoDB Java driver provides a clean configuration builder pipeline to define schemas:
+
+1. **`com.mongodb.client.model.CreateCollectionOptions`**:
+   This options class is passed to `MongoDatabase.createCollection(name, options)` during collection creation. Its primary validation configuration method is:
+   *   `.validationOptions(ValidationOptions validationOptions)`: Registers the validation rules.
+
+2. **`com.mongodb.client.model.ValidationOptions`**:
+   This builder class configures the validator query and control settings:
+   *   `.validator(Bson validator)`: Binds the validation rules query (typically a `$jsonSchema` document filter).
+   *   `.validationAction(ValidationAction action)`: Sets what occurs when validation fails:
+       *   `ValidationAction.ERROR` (Default): Rejects the write immediately and throws a database exception.
+       *   `ValidationAction.WARN`: Logs validation failures to the server's `mongod.log` but allows the write transaction to commit.
+   *   `.validationLevel(ValidationLevel level)`: Sets validation boundaries:
+       *   `ValidationLevel.STRICT` (Default): Validates all inserts and all updates.
+       *   `ValidationLevel.MODERATE`: Validates inserts and only validates updates on documents that *already* satisfy the rules.
+
+### 4.2 Building a `$jsonSchema` BSON Document
+
+The validator is defined as a standard query document mapping to a `$jsonSchema` operator:
+```json
+{
+  "$jsonSchema": {
+    "bsonType": "object",
+    "required": [ "fieldName1", "fieldName2" ],
+    "properties": {
+      "fieldName1": { "bsonType": "string" },
+      "fieldName2": { "bsonType": "double", "minimum": 0.0 }
+    }
+  }
+}
+```
+
+In Java, we build this hierarchy using nested BSON `Document` mappings.
+*   **Root Configuration**: The schema root must be defined as an object type using `.append("bsonType", "object")`.
+*   **Required Fields**: A list of required key names is registered using `.append("required", List.of("sku", "price"))`.
+*   **Properties Subdocument**: A nested `Document` maps each field name to its corresponding constraints:
+    *   `bsonType`: Constraints the data type. **Note**: Use BSON types (e.g. `"double"`, `"int"`, `"long"`, `"string"`, `"bool"`, `"date"`, `"objectId"`) rather than general JSON types (like `number`).
+    *   `minimum` / `maximum`: Defines numerical range limits.
+
+### 4.3 Code Example: Configuring Validation on Collection Creation
 
 ```java
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.CreateCollectionOptions;
 import com.mongodb.client.model.ValidationOptions;
+import com.mongodb.client.model.ValidationAction;
+import com.mongodb.client.model.ValidationLevel;
 import org.bson.Document;
 import java.util.List;
 
 public class BasicValidationDemo {
     public void configureValidation(MongoDatabase database) {
-        // Build JSON Schema document
+        // Step 1: Build the JSON Schema document rules
         Document jsonSchema = new Document("bsonType", "object")
             .append("required", List.of("sku", "price"))
             .append("properties", new Document()
                 .append("sku", new Document("bsonType", "string"))
-                .append("price", new Document("bsonType", "double").append("minimum", 0.0))
+                .append("price", new Document("bsonType", "double")
+                    .append("minimum", 0.0)
+                )
             );
 
-        // Map BSON JSON Schema to ValidationOptions
+        // Step 2: Configure ValidationOptions
         ValidationOptions validationOptions = new ValidationOptions()
             .validator(new Document("$jsonSchema", jsonSchema))
-            .validationAction(com.mongodb.client.model.ValidationAction.ERROR);
+            .validationAction(ValidationAction.ERROR)
+            .validationLevel(ValidationLevel.STRICT);
 
-        CreateCollectionOptions options = new CreateCollectionOptions().validationOptions(validationOptions);
+        // Step 3: Register validationOptions inside CreateCollectionOptions
+        CreateCollectionOptions options = new CreateCollectionOptions()
+            .validationOptions(validationOptions);
+
+        // Step 4: Create the validated collection
         database.createCollection("products", options);
     }
 }
@@ -113,6 +166,15 @@ public class BasicValidationDemo {
 
 Here is a comprehensive Java class constructing a complete validation schema covering required fields, type checks, enums, numeric bounds, pattern matches, arrays, and nested structures.
 
+#### Explaining BSON Schema Constraints:
+*   **Pattern Validation (`pattern`)**: Used on the `email` field to check string formats against a standard regular expression (e.g. verifying emails contain `@` and a valid domain suffix).
+*   **Enum Sets (`enum`)**: Limits acceptable values to a predefined list of exact string values (e.g. only allowing role roles `"STUDENT"`, `"INSTRUCTOR"`, `"ADMIN"`).
+*   **Numeric Ranges (`minimum` / `maximum`)**: Sets minimum and maximum boundaries on numerical types (e.g. GPA must be $\ge 0.0$ and $\le 4.0$).
+*   **Nested Schemas**: Declares a subdocument schema by configuring a field as `bsonType: "object"` and defining its own `properties` mapping (e.g. nested validation for `profile.firstName` and `profile.lastName`).
+*   **Array Items (`items` & `uniqueItems`)**:
+    *   `items`: Defines schema constraints for elements stored inside the array list.
+    *   `uniqueItems`: Setting this to `true` guarantees that array elements must be unique (no duplicate values allowed).
+
 ```java
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.CreateCollectionOptions;
@@ -164,10 +226,16 @@ public class ComplexSchemaValidation {
 }
 ```
 
----
-
 ### C. UPDATING SCHEMAS VIA `collMod`
-To modify the validation rules of an existing collection, you must issue the `collMod` command directly to the database.
+To modify the validation rules of an existing collection dynamically without dropping the collection, you must issue the `collMod` database administration command directly.
+
+#### Explaining the `collMod` API in Code:
+*   **`database.runCommand(Bson command)`**: Standard helper in the `MongoDatabase` API used to execute database admin operations. It takes a command document and returns the execution results as a BSON `Document`.
+*   **`collMod` Command Document Structure**:
+    *   `"collMod"`: The target collection name.
+    *   `"validator"`: The new `$jsonSchema` rules document.
+    *   `"validationLevel"`: Dynamic updates of validation boundaries (e.g. `"strict"` or `"moderate"`).
+    *   `"validationAction"`: Dynamic updates of action on failures (e.g. `"error"` or `"warn"`).
 
 ```java
 import com.mongodb.client.MongoDatabase;
@@ -188,10 +256,13 @@ public class SchemaModificationService {
 }
 ```
 
----
-
 ### D. JAVA EXCEPTION HANDLING
-When a write violates schema rules, MongoDB throws a `MongoWriteException`. The error document is caught, and we parse code `121` (DocumentValidationFailure).
+When a write operation (e.g., `insertOne` or `updateOne`) violates validation rules, the database server rejects it, and the Java driver throws a `MongoWriteException`.
+
+#### Explaining the Exception Handling API in Code:
+*   **`com.mongodb.MongoWriteException`**: Inherits from `MongoException`. It wraps write failures (such as unique constraints, lock failures, validation errors) returned by the MongoDB instance.
+*   **`e.getError().getCode()`**: Extracts the primary error code from the write failure detail.
+*   **BSON Error Code `121`**: Represents a **Document Validation Failure** (the document did not match the validation rules configured for that collection). We intercept this code to present friendly error warnings, while rethrowing other system exceptions.
 
 ```java
 import com.mongodb.MongoWriteException;
