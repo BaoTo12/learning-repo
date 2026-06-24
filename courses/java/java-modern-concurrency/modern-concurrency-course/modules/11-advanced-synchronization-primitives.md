@@ -24,19 +24,19 @@ By the end of this module you will be able to:
 ```
 Coordination Primitives
 ├── Counting & Barriers
-│   ├── CountDownLatch  — One-shot, count-down to zero, then release all waiting threads
-│   ├── CyclicBarrier   — Reusable, all parties arrive, then all are released together
-│   └── Phaser          — Multi-phase barrier, dynamic party registration
+│   ├── CountDownLatch  — One-shot barrier that releases threads when the count reaches zero
+│   ├── CyclicBarrier   — Reusable barrier that releases threads when all parties arrive
+│   └── Phaser          — Multi-phase barrier with dynamic registration
 │
 ├── Resource Limiting
-│   └── Semaphore       — Permit pool, N concurrent accessors maximum
+│   └── Semaphore       — Limits concurrent access using permits
 │
 ├── Data Exchange
-│   └── Exchanger       — Two threads swap objects at a rendezvous point
+│   └── Exchanger       — Swaps data between two threads
 │
 ├── Lock Variants
-│   ├── ReentrantLock   — Explicit lock with Condition variables and tryLock
-│   └── ReentrantReadWriteLock — Multiple readers OR one writer
+│   ├── ReentrantLock   — Lock with condition variables
+│   └── ReentrantReadWriteLock — Allows multiple readers or one writer
 │
 └── Queues (Blocking)
     ├── LinkedBlockingQueue  — Unbounded/bounded FIFO
@@ -50,7 +50,7 @@ Coordination Primitives
 
 ## 11.2 `CountDownLatch` — One-Shot Barrier
 
-`CountDownLatch` allows one or more threads to wait until a set of operations have completed. It cannot be reset.
+`CountDownLatch` lets threads wait until a set of operations completes. It cannot be reused.
 
 ```java
 import java.util.concurrent.CountDownLatch;
@@ -59,16 +59,16 @@ import java.util.concurrent.CountDownLatch;
 public class RaceStart {
     public static void main(String[] args) throws InterruptedException {
         int runners = 8;
-        CountDownLatch ready = new CountDownLatch(runners); // Runners signal readiness
-        CountDownLatch start = new CountDownLatch(1);        // Starter fires once
+        CountDownLatch ready = new CountDownLatch(runners); // Runners signal when ready
+        CountDownLatch start = new CountDownLatch(1);        // Starter signals once
 
         for (int i = 0; i < runners; i++) {
             final int runnerId = i;
             Thread.startVirtualThread(() -> {
                 System.out.printf("Runner %d: Ready!%n", runnerId);
-                ready.countDown();             // Signal: I'm ready
+                ready.countDown();             // Signal readiness
                 try {
-                    start.await();             // Wait for the start gun
+                    start.await();             // Wait for the start signal
                     System.out.printf("Runner %d: Running!%n", runnerId);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -76,9 +76,9 @@ public class RaceStart {
             });
         }
 
-        ready.await();                         // Wait for ALL runners to be ready
+        ready.await();                         // Wait for all runners
         System.out.println("All ready. GO!");
-        start.countDown();                     // Fire the start gun (releases all runners)
+        start.countDown();                     // Release all runners
     }
 }
 ```
@@ -96,12 +96,12 @@ public class ServiceInitializer {
                     initializeService(service);
                     System.out.printf("[%s] Initialized%n", service);
                 } finally {
-                    allReady.countDown(); // Always count down, even on failure
+                    allReady.countDown(); // Ensure the count decreases
                 }
             });
         }
 
-        boolean completed = allReady.await(30, TimeUnit.SECONDS); // Timeout!
+        boolean completed = allReady.await(30, TimeUnit.SECONDS); // Wait with a timeout
         if (!completed) {
             throw new RuntimeException("Service initialization timed out");
         }
@@ -115,17 +115,17 @@ public class ServiceInitializer {
 }
 ```
 
-**When to use `CountDownLatch`:**
+**Use cases:**
 - One-time initialization sequencing
-- Test synchronization (simulate concurrent load)
-- Waiting for external events (N async callbacks)
-- **Cannot reuse** — create a new one for each phase
+- Test synchronization (simulating concurrent load)
+- Waiting for async callbacks
+- Cannot be reused
 
 ---
 
 ## 11.3 `CyclicBarrier` — Reusable Multi-Party Barrier
 
-All parties must arrive at the barrier before any can proceed. After all arrive, the barrier resets automatically for the next cycle.
+All threads must arrive before any can proceed. The barrier resets automatically for the next cycle.
 
 ```java
 import java.util.concurrent.CyclicBarrier;
@@ -136,7 +136,7 @@ public class PhaseSimulation {
     static final int WORKERS = 4;
     static final int PHASES = 3;
 
-    // Optional barrier action: runs once when all parties arrive (in one of the arriving threads)
+    // Optional action run when all threads arrive
     static CyclicBarrier barrier = new CyclicBarrier(WORKERS, () ->
         System.out.printf("=== Phase complete! Next phase starting. ===%n")
     );
@@ -151,7 +151,7 @@ public class PhaseSimulation {
                         doWork(workerId, phase);
 
                         // Wait for ALL workers to finish this phase
-                        barrier.await(); // Blocks until all WORKERS call await()
+                        barrier.await(); // Blocks until all threads arrive
                         // After await() returns: all workers have finished this phase
                         // The barrier has been automatically reset for the next phase
                     }
@@ -171,7 +171,7 @@ public class PhaseSimulation {
 
 **`CyclicBarrier` vs `CountDownLatch`:**
 
-| | `CountDownLatch` | `CyclicBarrier` |
+| Feature | `CountDownLatch` | `CyclicBarrier` |
 | :--- | :--- | :--- |
 | **Reusable** | No (one-shot) | Yes (auto-reset) |
 | **Who waits** | Any thread calls `await()` | ALL parties must call `await()` |
@@ -179,17 +179,17 @@ public class PhaseSimulation {
 | **On exception** | No automatic break | `BrokenBarrierException` propagates |
 | **Use case** | One-time synchronization | Iterative parallel algorithms |
 
-**`BrokenBarrierException`:** If one thread is interrupted while waiting, the barrier is broken. All other waiting threads wake up with `BrokenBarrierException`. Handle this by resetting with `barrier.reset()` or propagating failure.
+**`BrokenBarrierException`:** If a thread is interrupted while waiting, the barrier breaks. Other waiting threads wake up with `BrokenBarrierException`. Call `barrier.reset()` or propagate the failure to handle this.
 
 ---
 
 ## 11.4 `Phaser` — Dynamic Multi-Phase Coordination
 
-`Phaser` is the most flexible barrier primitive. It supports:
-- **Dynamic party registration**: parties can register/deregister at runtime
-- **Arbitrary phases**: the same `Phaser` coordinates unlimited sequential phases
-- **Hierarchical phasers**: tree of phasers for very large party counts
-- **Tiered arrivals**: threads can arrive and continue without waiting (`arriveAndDeregister`)
+`Phaser` is a flexible barrier that supports:
+- Dynamic registration of threads at runtime.
+- Multiple sequential phases.
+- Hierarchical phasers for large numbers of threads.
+- Tiered arrivals: threads can arrive and continue without waiting (`arriveAndDeregister`)
 
 ```java
 import java.util.concurrent.Phaser;
@@ -247,7 +247,7 @@ public class DataPipelineWithPhaser {
 }
 ```
 
-**Phaser termination:** When `onAdvance()` returns `true`, the phaser is terminated. Subsequent `await` calls return a negative phase number.
+**Phaser termination:** When `onAdvance()` returns true, the phaser terminates. Subsequent `await` calls return a negative phase number.
 
 ```java
 // Check if phaser is terminated:
@@ -259,21 +259,19 @@ if (phase < 0) {
 
 **Hierarchical Phaser for large party counts:**
 ```java
-// Flat phaser with 10,000 parties → O(N) overhead on each advance
-// Hierarchical: tree of phasers reduces overhead to O(log N)
+// A flat phaser has higher overhead with many threads. A hierarchical tree of phasers reduces this overhead.
 Phaser root = new Phaser();
 Phaser child1 = new Phaser(root, 5000); // 5000 parties registered to parent
 Phaser child2 = new Phaser(root, 5000); // Another 5000 parties
 
-// Workers use child phasers — children internally notify the parent when all arrive
-// Parent phaser advances only when all children have advanced
+// Child phasers notify the parent when their threads arrive.
 ```
 
 ---
 
 ## 11.5 `Semaphore` — Resource Pool Throttling
 
-`Semaphore` maintains a set of permits. `acquire()` obtains a permit (blocking if none available). `release()` returns a permit.
+`Semaphore` manages a pool of permits. `acquire()` takes a permit, blocking if none are available. `release()` returns a permit.
 
 ```java
 import java.util.concurrent.Semaphore;
@@ -284,17 +282,17 @@ public class ThrottledResourceAccess {
     private static final Semaphore DB_SEMAPHORE = new Semaphore(10);
 
     public String queryDatabase(String query) throws InterruptedException {
-        DB_SEMAPHORE.acquire();       // Block if 10 connections already in use
+        DB_SEMAPHORE.acquire();       // Block if all permits are in use
         try {
-            return executeQuery(query); // Execute with guaranteed connection slot
+            return executeQuery(query); // Access the resource
         } finally {
-            DB_SEMAPHORE.release();   // ALWAYS release in finally
+            DB_SEMAPHORE.release();   // Always release the permit in a finally block.
         }
     }
 
     // Non-blocking try (for optional operations)
     public Optional<String> tryQueryDatabase(String query) throws InterruptedException {
-        if (DB_SEMAPHORE.tryAcquire(100, TimeUnit.MILLISECONDS)) { // Timeout!
+        if (DB_SEMAPHORE.tryAcquire(100, TimeUnit.MILLISECONDS)) { // Acquire with a timeout
             try {
                 return Optional.of(executeQuery(query));
             } finally {
@@ -310,31 +308,29 @@ public class ThrottledResourceAccess {
 
 **Fair vs Unfair Semaphore:**
 ```java
-// Unfair (default): highest-throughput, no ordering guarantee
+// Unfair (default) has higher throughput but no ordering guarantee.
 Semaphore unfair = new Semaphore(10);
 
-// Fair: threads acquire in FIFO order — prevents thread starvation under sustained load
+// Fair mode serves threads in order to prevent starvation.
 Semaphore fair = new Semaphore(10, true);
-// Cost: lower throughput due to queue management overhead
-// Use when: some threads could wait indefinitely without fairness
+// This has lower throughput due to queue overhead.
 ```
 
 **Semaphore as mutex (binary semaphore):**
 ```java
-// Semaphore can be released by a DIFFERENT thread than the acquirer
-// This is impossible with ReentrantLock (which must be released by the holder)
+// Any thread can release a semaphore permit. A ReentrantLock must be released by the thread that holds it.
 Semaphore mutex = new Semaphore(1);
 mutex.acquire();  // Thread A acquires
 // ... Thread A delegates work to Thread B ...
 // Thread B can legitimately release the semaphore
-mutex.release();  // Thread B releases — valid! (unlike ReentrantLock)
+mutex.release();  // Thread B releases — valid!
 ```
 
 ---
 
 ## 11.6 `Exchanger` — Bidirectional Data Handoff
 
-`Exchanger` allows exactly two threads to swap objects at a synchronization point. Both threads call `exchange()` and block until the other thread arrives, then both receive the other's object.
+`Exchanger` lets two threads swap objects. Both threads block until they both arrive at the exchange point.
 
 ```java
 import java.util.concurrent.Exchanger;
@@ -354,7 +350,7 @@ public class DoubleBufferedPipeline {
                         fillBuffer.add(readFromSource());
                     }
                     // Exchange full buffer for an empty one (consumer gives us back the drained buffer)
-                    fillBuffer = exchanger.exchange(fillBuffer); // Blocks until consumer arrives
+                    fillBuffer = exchanger.exchange(fillBuffer); // Blocks until the other thread arrives
                     fillBuffer.clear(); // Reset the returned (now-empty) buffer
                 }
             } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -380,14 +376,14 @@ public class DoubleBufferedPipeline {
 }
 ```
 
-**Why `Exchanger` outperforms a shared queue here:** No allocation of `LinkedList` nodes, no lock on queue head and tail, no per-item synchronization. The exchange happens once per buffer, amortizing synchronization cost across 100 items.
+**Why `Exchanger` outperforms a shared queue here:** Using an exchanger avoids queue allocations and lock contention by swapping whole buffers at once.
 
 **Exchanger with timeout:**
 ```java
 try {
     T result = exchanger.exchange(myData, 5, TimeUnit.SECONDS);
 } catch (TimeoutException e) {
-    // Partner thread didn't arrive in time — handle gracefully
+    // Handle the timeout
 }
 ```
 
@@ -395,7 +391,7 @@ try {
 
 ## 11.7 `ReentrantLock` and Condition Variables
 
-`ReentrantLock` gives full control that `synchronized` does not: timed locking, interruptible locking, fairness, and multiple condition queues per lock.
+`ReentrantLock` provides features not available with `synchronized`, including timed locking, interruptible locking, and multiple conditions.
 
 ```java
 import java.util.concurrent.locks.*;
@@ -416,9 +412,8 @@ public class BoundedBlockingQueue<T> {
     public void put(T item) throws InterruptedException {
         lock.lock();
         try {
-            while (queue.size() == capacity) { // Always check condition in a LOOP
-                notFull.await(); // Atomically: release lock + park this thread
-                                 // Woken up when space available → re-acquire lock → re-check
+            while (queue.size() == capacity) { // Always check the condition in a loop
+                notFull.await(); // Release the lock and wait. When signaled, re-acquire the lock and check the condition again.
             }
             queue.addLast(item);
             notEmpty.signal(); // Notify one waiting consumer
@@ -430,7 +425,7 @@ public class BoundedBlockingQueue<T> {
     public T take() throws InterruptedException {
         lock.lock();
         try {
-            while (queue.isEmpty()) { // Loop because of spurious wakeups
+            while (queue.isEmpty()) { // Loop to handle spurious wakeups
                 notEmpty.await();
             }
             T item = queue.removeFirst();
@@ -467,8 +462,8 @@ public class BoundedBlockingQueue<T> {
 while (true) {
     lock.lock();
     try {
-        if (queue.isEmpty()) {  // ← WRONG: not a loop
-            notEmpty.await();   // If woken spuriously, falls through with empty queue!
+        if (queue.isEmpty()) {  // ← Incorrect: Using an if statement is susceptible to spurious wakeups.
+            notEmpty.await();   // A spurious wakeup can cause errors if the condition is not re-checked.
         }
         return queue.removeFirst(); // NPE or wrong state
     } finally { lock.unlock(); }
@@ -476,18 +471,18 @@ while (true) {
 
 // CORRECT: loops until condition is actually true
 while (queue.isEmpty()) {
-    notEmpty.await(); // If spurious wakeup: loop re-checks condition
+    notEmpty.await(); // Loops until the condition is met.
 }
 ```
 
-**Spurious wakeups** are permitted by the POSIX specification (and therefore by Java). `Condition.await()` may return even without a corresponding `signal()`. This is not a JVM bug — it is a deliberate specification allowance for OS-level optimization. Always loop.
+**Spurious wakeups** can occur where `await()` returns without a signal. Always use a loop to verify the condition.
 
 ### `tryLock` — Non-Blocking Lock Acquisition
 
 ```java
 ReentrantLock lock = new ReentrantLock();
 
-// Non-blocking: fail immediately if lock is held
+// Fail immediately if the lock is held
 if (lock.tryLock()) {
     try { /* do work */ }
     finally { lock.unlock(); }
@@ -496,12 +491,12 @@ if (lock.tryLock()) {
     handleLockUnavailable();
 }
 
-// With timeout: wait at most 500ms
+// Wait for the lock with a timeout
 if (lock.tryLock(500, TimeUnit.MILLISECONDS)) {
     try { /* do work */ }
     finally { lock.unlock(); }
 } else {
-    // Timed out — avoid starvation in retry loops
+    // Timed out
 }
 ```
 
@@ -512,26 +507,25 @@ if (lock.tryLock(500, TimeUnit.MILLISECONDS)) {
 Java's blocking queue implementations are production-grade coordination tools:
 
 ```java
-// ArrayBlockingQueue: bounded, strict FIFO, single lock (readers and writers contend)
+// Bounded queue using a single lock
 BlockingQueue<Task> bounded = new ArrayBlockingQueue<>(100);
 
-// LinkedBlockingQueue: optionally bounded, separate head/tail locks (higher throughput)
+// Optioned bounded queue with separate locks for head and tail
 BlockingQueue<Task> linked = new LinkedBlockingQueue<>(1000);
 
-// SynchronousQueue: zero capacity — direct handoff, no buffering
-// Producer blocks until consumer takes; consumer blocks until producer puts
+// Zero-capacity queue for direct handoff
 BlockingQueue<Task> direct = new SynchronousQueue<>();
-// Used inside: Executors.newCachedThreadPool() for direct task-to-thread handoff
+// Threads block until a handoff occurs
 
-// PriorityBlockingQueue: unbounded, priority-ordered (items must implement Comparable)
+// Unbounded queue sorted by priority
 BlockingQueue<Task> priority = new PriorityBlockingQueue<>();
 
-// DelayQueue: items only become available after their delay expires
+// Queue where items are available only after a delay
 DelayQueue<ScheduledTask> delayed = new DelayQueue<>();
 
-// LinkedTransferQueue: most scalable for concurrent producer/consumer (uses MS queue internally)
+// Scalable queue that supports direct transfer
 TransferQueue<Task> transfer = new LinkedTransferQueue<>();
-transfer.transfer(task); // Blocks until a consumer takes the item directly (like SynchronousQueue)
+transfer.transfer(task); // Blocks until a consumer takes the item directly
 transfer.put(task);      // Enqueues normally if no consumer waiting
 ```
 
@@ -560,7 +554,7 @@ public class ETLPipeline {
     static final BlockingQueue<RawRecord> raw = new ArrayBlockingQueue<>(BUFFER);
     static final BlockingQueue<ProcessedRecord> processed = new ArrayBlockingQueue<>(BUFFER);
 
-    // Poison pill pattern for graceful shutdown
+    // Poison pill pattern for shutdown
     static final RawRecord RAW_POISON = new RawRecord("POISON");
     static final ProcessedRecord PROC_POISON = new ProcessedRecord("POISON");
 
@@ -575,7 +569,7 @@ public class ETLPipeline {
         Thread.startVirtualThread(() -> {
             try {
                 for (int i = 0; i < 10_000; i++) {
-                    raw.put(new RawRecord("row-" + i)); // Blocks if buffer full (backpressure)
+                    raw.put(new RawRecord("row-" + i)); // Blocks if the queue is full.
                 }
                 // Send one poison pill per transformer
                 for (int i = 0; i < workers; i++) raw.put(RAW_POISON);

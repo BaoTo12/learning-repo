@@ -1,17 +1,17 @@
 # Module 07: Modern Framework Integrations & Best Practices
 
-With virtual threads finalized in the Java ecosystem, modern frameworks have introduced official integrations. Retrofitting frameworks to use virtual threads allows applications to handle massive concurrency using simple, imperative, block-tolerant programming models.
+With virtual threads finalized in the Java ecosystem, modern frameworks have introduced official integrations. Updating frameworks to use virtual threads lets applications handle high concurrency using simple, imperative, block-tolerant programming models.
 
-In this module, we will explore virtual thread integrations within **Spring Boot**, **Quarkus**, and **Jakarta EE**, analyze database connection pool bottlenecks, outline general production best practices, and implement three hands-on integration labs.
+In this module, we will explore virtual thread integrations in **Spring Boot**, **Quarkus**, and **Jakarta EE**, analyze database connection pool bottlenecks, outline production best practices, and implement three hands-on integration labs.
 
 ---
 
 ## 1. Spring Boot Integration (3.2+)
 
-Historically, Spring Boot applications have utilized a **thread-per-request** model (via standard thread pools in Apache Tomcat, Jetty, or Undertow). In high-scale workloads, blocking operations bound platform threads, creating thread pool exhaustion bottlenecks.
+Historically, Spring Boot applications have used a **thread-per-request** model (via platform thread pools in Tomcat, Jetty, or Undertow). In high-scale workloads, blocking operations bound platform threads, causing thread pool exhaustion.
 
 ### Auto-Configuration
-Starting with Spring Boot 3.2, you can switch the entire execution engine to virtual threads using a single configuration property:
+Starting with Spring Boot 3.2, you can switch the execution engine to virtual threads using a single property:
 
 ```properties
 # application.properties
@@ -29,12 +29,12 @@ spring:
 ```
 
 When enabled:
-1. **Tomcat/Jetty/Undertow** protocol executors automatically switch from standard thread pools to a virtual-thread-per-task executor.
+1. **Tomcat/Jetty/Undertow** protocol executors automatically switch from platform thread pools to a virtual-thread-per-task executor.
 2. **Task Execution** (`@Async`) and **Task Scheduling** (`@Scheduled`) automatically use virtual threads via `SimpleAsyncTaskExecutor` and `SimpleAsyncTaskScheduler`.
 
 ### Under the Hood: Tomcat Request Execution
 
-Without virtual threads, Tomcat maintains a pool of platform threads (typically capped at 200). When a request arrives, Tomcat assigns it a worker thread. If the service makes a blocking database query, the worker thread is pinned and cannot do any other work.
+Without virtual threads, Tomcat maintains a pool of platform threads (typically capped at 200). When a request arrives, Tomcat assigns it a worker thread. If the service makes a blocking database query, the worker thread is pinned and cannot process other requests.
 
 ```
 [Request 1] ──► Tomcat Thread Pool Worker 1 ──► [Blocks on DB (1s)] (Worker 1 pinned)
@@ -44,8 +44,8 @@ Without virtual threads, Tomcat maintains a pool of platform threads (typically 
 ```
 
 With `spring.threads.virtual.enabled=true`:
-* Tomcat customizes its protocol executor to use `Executors.newVirtualThreadPerTaskExecutor()`.
-* Every HTTP request is assigned a new virtual thread.
+* Tomcat configures its protocol executor to use `Executors.newVirtualThreadPerTaskExecutor()`.
+* Every HTTP request runs on a new virtual thread.
 * If a request blocks on a database or HTTP call, the virtual thread yields its continuation state, allowing the carrier platform thread to execute other virtual threads.
 
 ```
@@ -57,21 +57,21 @@ With `spring.threads.virtual.enabled=true`:
 
 ### Tomcat's Request Dispatching Mechanics: Acceptor/Poller Thread Model
 
-To understand the scalability benefit of virtual threads, we must examine how Tomcat's non-blocking I/O endpoint dispatcher handles requests. Tomcat uses three groups of threads under the hood:
+To understand the scalability benefits of virtual threads, we must examine how Tomcat's non-blocking I/O endpoint dispatcher handles requests. Tomcat uses three groups of threads:
 
 1. **Acceptor Threads**:
-   - Run in a tight loop executing socket accept calls: `serverSocket.accept()`.
-   - When a client establishes a TCP connection, the Acceptor thread accepts the connection socket and hands off the socket channel (`SocketChannel`) to one of Tomcat's **Poller Threads**.
+   - Run in a loop executing socket accept calls: `serverSocket.accept()`.
+   - When a client connects, the Acceptor thread accepts the TCP connection and hands the socket channel (`SocketChannel`) to a **Poller Thread**.
 
 2. **Poller Threads**:
    - Maintain an OS-level selector loop (`java.nio.channels.Selector`).
-   - The Poller thread monitors thousands of socket channels for read events. When a client sends HTTP bytes, the selector fires.
-   - The Poller thread reads the incoming headers, wraps the socket event in a request execution task, and hands it off to Tomcat's **Protocol Executor**.
+   - Monitor thousands of socket channels for read events. When a client sends HTTP bytes, the selector fires.
+   - The Poller thread reads the incoming headers, wraps the socket event in a request execution task, and hands it off to the **Protocol Executor**.
 
 3. **Protocol Executor**:
-   - Under standard Spring Boot configuration, this is a bounded platform thread pool (`ThreadPoolExecutor`, default max size 200).
-   - If a request execution task blocks (e.g. executing a database read for 1 second), the pool worker thread is pinned to that request, unable to return to the pool.
-   - If 200 concurrent requests block, the pool is saturated. When the Poller thread attempts to dispatch the 201st request task, the executor rejects the task or queues it, causing client request timeouts even though CPU utilization is near 0%.
+   - Under standard configuration, this is a bounded platform thread pool (`ThreadPoolExecutor`, default max size 200).
+   - If a request task blocks (e.g. executing a database read for 1 second), the pool worker thread is pinned to that request, unable to return to the pool.
+   - If 200 concurrent requests block, the pool is saturated. When the Poller thread attempts to dispatch the 201st request task, the executor rejects or queues it, causing client request timeouts even though CPU usage is low.
 
 #### The Virtual Thread Dispatching Workflow
 
@@ -95,15 +95,14 @@ When `spring.threads.virtual.enabled=true` is set:
 ```
 
 1. Tomcat customizes the Protocol Executor, wrapping it in `Executors.newVirtualThreadPerTaskExecutor()`.
-2. When the Poller thread detects read bytes and submits the task, the executor bypasses the queue and immediately allocates a new virtual thread on the heap for the request.
+2. When the Poller thread detects read bytes and submits the task, the executor bypasses the queue and allocates a new virtual thread on the heap for the request.
 3. The virtual thread executes the Spring controller lifecycle. When it queries the database or calls a downstream microservice, the driver executes `LockSupport.park()`.
 4. The JVM intercepts the park command, pauses the continuation, moves the virtual thread's stack frames to the heap, and frees the carrier thread.
-5. The underlying carrier platform thread returns to the ForkJoinPool scheduler. It is immediately available to process other requests or run other active virtual threads.
-6. The Tomcat Poller thread remains unblocked and can continue to selector-read socket data, dispatching requests without queue starvation.
-
+5. The carrier platform thread returns to the ForkJoinPool scheduler. It is immediately available to process other requests or run other active virtual threads.
+6. The Tomcat Poller thread remains unblocked and can continue to read socket data, dispatching requests without queue starvation.
 
 ### Manual Configuration
-If you require custom lifecycle adapter configurations or are integrating virtual threads into older versions of Spring Boot (pre-3.2), you can define custom beans:
+If you require custom configurations or are integrating virtual threads into older versions of Spring Boot (pre-3.2), you can define custom beans:
 
 #### 1. Embedded Tomcat Virtual Thread Customizer
 ```java
@@ -174,29 +173,29 @@ public class ScheduledVirtualThreadConfig {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: Spring Manual Configurations
+##### Code Walkthrough: Spring Manual Configurations
 
-1. **Tomcat Protocol Handler Customization (`TomcatVirtualThreadConfig`)**:
-   - At line 73, the method declares a `TomcatProtocolHandlerCustomizer<?>` bean. This interface allows configuration hooks into the embedded Tomcat container.
-   - Line 74 registers a lambda that receives the Tomcat `ProtocolHandler`.
-   - Line 76 calls `protocolHandler.setExecutor(Executors.newVirtualThreadPerTaskExecutor())`. This overrides the default platform thread pool.
-   - When a HTTP request is received, Tomcat bypasses its internal queue and immediately spawns a new virtual thread, allowing high concurrency with minimal CPU and memory overhead.
+1. **Tomcat Protocol Handler Customization**:
+   - In `TomcatVirtualThreadConfig`, the method `tomcatProtocolHandlerCustomizer()` declares a customization bean. This interface allows configuration hooks into the embedded Tomcat container.
+   - The customizer registers a lambda that receives the Tomcat `ProtocolHandler`.
+   - It calls `protocolHandler.setExecutor(Executors.newVirtualThreadPerTaskExecutor())` to override the default platform thread pool with a virtual thread executor.
+   - When an HTTP request is received, Tomcat bypasses its internal queue and immediately spawns a new virtual thread, allowing high concurrency with minimal overhead.
 
-2. **Async Task Offloading (`AsyncVirtualThreadConfig`)**:
-   - At line 98, the method defines a bean named `"taskExecutor"`. Spring Boot relies on a bean of this name to process methods annotated with `@Async`.
-   - Line 101 uses Spring's `TaskExecutorAdapter` class. Since Spring's core scheduler API expects an instance of Spring's `AsyncTaskExecutor`, `TaskExecutorAdapter` acts as a adapter pattern class, wrapping standard Java virtual thread executors (`newVirtualThreadPerTaskExecutor()`).
-   - When a method with `@Async` is invoked, Spring executes the underlying method inside a newly spawned virtual thread.
+2. **Async Task Offloading**:
+   - In `AsyncVirtualThreadConfig`, the method defines a bean named `taskExecutor()`. Spring Boot relies on a bean of this name to process methods annotated with `@Async`.
+   - It uses Spring's `TaskExecutorAdapter` class. Since Spring's core scheduler API expects an instance of Spring's `AsyncTaskExecutor`, `TaskExecutorAdapter` acts as an adapter, wrapping the standard Java virtual thread executor.
+   - When a method with `@Async` is called, Spring runs the method inside a newly spawned virtual thread.
 
-3. **Background Job Scheduling (`ScheduledVirtualThreadConfig`)**:
-   - At line 121, a custom `TaskScheduler` bean is defined to support `@Scheduled` methods (e.g. cron tasks, repeating operations).
-   - Line 122 instantiates `SimpleAsyncTaskScheduler`. This scheduler class can execute tasks using a separate thread per execution.
-   - Line 123 invokes `scheduler.setVirtualThreads(true)`. This tells the scheduler to execute each scheduled task inside a virtual thread.
-   - Line 124 configures the prefix to `"scheduled-vt-"`, helping developers easily filter and monitor scheduled tasks inside JFR or thread dumps.
+3. **Background Job Scheduling**:
+   - In `ScheduledVirtualThreadConfig`, a custom `TaskScheduler` bean is defined to support `@Scheduled` methods (like cron tasks).
+   - It instantiates `SimpleAsyncTaskScheduler`, which can execute tasks using a separate thread per execution.
+   - It calls `scheduler.setVirtualThreads(true)` to execute each scheduled task inside a virtual thread.
+   - It configures the thread name prefix to `"scheduled-vt-"`, helping developers monitor scheduled tasks in JFR or thread dumps.
 
 ---
 
 ### Spring Data JPA & Connection Pool Sizing
-Virtual threads allow you to process thousands of requests concurrently. However, if your service queries a relational database, the database connection pool (e.g., HikariCP) will become the primary bottleneck.
+Virtual threads allow you to process thousands of requests concurrently. However, if your service queries a relational database, the database connection pool (like HikariCP) will become the primary bottleneck.
 
 ```
 [Virtual Threads: 10,000 requests] ──► [HikariCP Connection Pool: max-size = 10] ──► (Blocked Threads waiting for DB connections)
@@ -209,20 +208,20 @@ Virtual threads allow you to process thousands of requests concurrently. However
 
 ### Connection Pool Wait Queue Starvation & Semaphore Backpressure Mechanics
 
-To understand why scaling the database connection pool to match virtual thread count is a fatal design mistake, we must analyze the interaction between the connection pool manager, the JVM thread scheduler, and the database engine.
+To understand why scaling the database connection pool to match virtual thread count causes issues, we must analyze the interaction between the connection pool manager, the JVM thread scheduler, and the database engine.
 
 #### 1. Database Engine Resource Exhaustion
-A database server (e.g., PostgreSQL or MySQL) processes queries using operating system processes or platform threads. Each active connection established by a client spawns a corresponding worker thread or processes query locks on the database server.
+A database server (such as PostgreSQL or MySQL) processes queries using operating system processes or platform threads. Each active connection established by a client spawns a corresponding worker thread or processes query locks on the database server.
 * If HikariCP is configured with a maximum pool size of 10,000, and 10,000 virtual threads concurrently acquire connections:
   - The database server must manage 10,000 physical connections.
-  - The database server’s CPU cores are overwhelmed by context switching, locking contention, and disk write synchronization queue bottlenecks.
+  - The database server’s CPU cores are overwhelmed by context switching, locking contention, and disk write synchronization.
   - The database server's memory is exhausted by connection context allocations, leading to system crashes or severe performance degradation.
 
 #### 2. HikariCP Queue Starvation
 HikariCP manages connections using a `ConcurrentBag` structure. When a thread requests a connection, HikariCP first checks if an idle connection is available in its local bag. If not, it enqueues the requesting thread in a synchronization wait queue.
 * Under standard platform threads, if the connection wait queue fills up, only 200 threads wait (since Tomcat limits concurrent request handling to 200).
 * Under virtual threads, if 10,000 virtual threads request a connection from a pool of size 50, then 9,950 virtual threads are enqueued in the connection pool's internal wait queues.
-* Each parked virtual thread waits for a connection. While this is cheap in terms of memory (since virtual threads yield their carrier threads), the wait queues inside the connection pool can experience high contention. If connection duration is slow, many virtual threads will timeout waiting for a connection, throwing connection acquisition exceptions.
+* Each parked virtual thread waits for a connection. While this is cheap in terms of memory, the wait queues inside the connection pool can experience high contention. If connection duration is slow, many virtual threads will timeout waiting for a connection, throwing exceptions.
 
 #### 3. Resolving Bottlenecks using Semaphore Backpressure
 The solution is to decouple request concurrency from database connection concurrency by applying a rate-limiting `Semaphore` in the application layer.
@@ -245,10 +244,9 @@ The solution is to decouple request concurrency from database connection concurr
   - The application instantiates a `Semaphore(50)` (matching or slightly below the database pool size).
   - Before querying the database, the virtual thread must call `semaphore.acquire()`.
   - If 1,000 requests arrive, 50 virtual threads acquire permits and proceed to query HikariCP, immediately obtaining a database connection without queuing.
-  - The other 950 virtual threads fail to acquire a permit. They are parked by the JVM. Their stack frames are moved to the heap, and their carrier threads are released to run other, unrelated tasks.
+  - The other 950 virtual threads fail to acquire a permit. They are parked by the JVM. Their stack frames are moved to the heap, and their carrier threads are released to run other tasks.
   - Once a transaction completes, the worker virtual thread releases the semaphore permit in a `finally` block, prompting the JVM to reschedule one of the suspended virtual threads.
   - This keeps the database pool contention low, protects the database engine, and prevents connection acquisition timeouts.
-
 
 #### Hikari Connection Pool Monitor Service
 Below is a utility to monitor Hikari connection pool usage metrics to help identify bottlenecks in high-concurrency systems:
@@ -385,28 +383,27 @@ class ThrottledConnection implements Connection {
 }
 ```
 
-##### Line-by-Line Logic Walkthrough: `ThrottledDataSource`
-1. **Permit Acquisition Throttling (`getConnection()`)**:
-   - When a service layer attempts to query the database, it obtains a connection from `ThrottledDataSource.getConnection()`.
-   - The method calls `semaphore.acquire()`. If all connection permits are allocated, the thread is parked.
-   - If the caller is a virtual thread, it yields its carrier thread. This prevents standard Hikari connection timeouts and thread exhaustion.
+##### Code Walkthrough: `ThrottledDataSource`
+1. **Permit Acquisition Throttling**:
+   - In `ThrottledDataSource`, when the service layer calls `getConnection()`, the code runs `semaphore.acquire()`. If all connection permits are allocated, the calling thread blocks.
+   - If the caller is a virtual thread, it yields its carrier thread. This prevents connection timeouts and carrier thread exhaustion.
 2. **Decorator Injection**:
-   - The database driver retrieves the actual physical connection via `delegate.getConnection()`.
+   - The database driver retrieves the physical connection using the wrapped `delegate.getConnection()`.
 3. **Automatic Resource Release**:
-   - The retrieved connection is wrapped in a decorator `ThrottledConnection`.
-   - When the transaction finishes and calls `close()`, the `ThrottledConnection` closes the underlying delegate connection first, then triggers `semaphore.release()`. This ensures that permits are returned, preventing resource leaks.
+   - The connection is returned inside a decorator `ThrottledConnection`.
+   - When the transaction finishes and calls `close()`, `ThrottledConnection` closes the underlying delegate connection, then calls `semaphore.release()`. This returns the permit to the semaphore, preventing resource leaks.
 
 ---
 
 ### Spring WebFlux: Event Loop Offloading & Event Loop Bypass Internals
 
-Spring WebFlux is built around non-blocking event loop engines (usually Netty). The primary rule of reactive architectures is: **Never block the event loop**. If an event loop thread is blocked (e.g., by a legacy blocking driver or a complex CPU calculation), Netty cannot process any incoming requests, freezing the entire application instance.
+Spring WebFlux is built around non-blocking event loop engines (usually Netty). The primary rule of reactive architectures is: **Never block the event loop**. If an event loop thread is blocked (e.g., by a legacy blocking driver or a complex CPU calculation), Netty cannot process any incoming requests, freezing the application.
 
 #### Netty's Selector Loop & The Blocking Freeze
-Netty processes all network traffic using a small pool of platform threads called **Event Loops** (typically $2 \times \text{CPU Cores}$). Each event loop thread runs in an infinite selector loop, waiting for channel ready events (e.g. read, write, accept).
-* When a HTTP request arrives, Netty's event loop parses the HTTP bytes, invokes the reactive handler pipeline, and expects the method to return a publisher (`Flux`/`Mono`) immediately.
+Netty processes network traffic using a small pool of platform threads called **Event Loops** (typically $2 \times \text{CPU Cores}$). Each event loop thread runs in an infinite selector loop, waiting for channel events (like read, write, accept).
+* When an HTTP request arrives, Netty's event loop parses the HTTP bytes, invokes the reactive handler pipeline, and expects the method to return a publisher (`Flux`/`Mono`) immediately.
 * If a database query or legacy SOAP client blocks (e.g. blocking the thread for 250ms) directly inside the handler executing on the Netty event loop thread, the selector loop is frozen.
-* While frozen, Netty cannot process TCP packets for *any other* connection mapped to that event loop. Incoming requests are buffered in the OS TCP backlog queue, eventually causing packet drops, client socket closures, and container health-check failures.
+* While frozen, Netty cannot process TCP packets for *any other* connection mapped to that event loop. Incoming requests are buffered in the OS TCP backlog queue, eventually causing packet drops and timeouts.
 
 #### Offloading to Virtual Threads via `publishOn`
 With virtual threads, we can easily bypass reactive stream complexity and safely offload blocking queries without event loop starvation:
@@ -435,8 +432,7 @@ With virtual threads, we can easily bypass reactive stream complexity and safely
 3. By invoking `.publishOn(vtScheduler)`, we instruct Project Reactor to execute all downstream operators on the virtual thread scheduler.
 4. When the request is processed, the Netty event loop thread enqueues the execution task in the virtual thread executor's queue and immediately returns to its socket selector loop.
 5. A carrier thread fetches the task, mounts the virtual thread, and executes the blocking call.
-6. When the JDBC driver blocks on I/O, the virtual thread's continuation yields, and the carrier thread is returned to the ForkJoinPool scheduler. Netty event loops are kept completely free, retaining 100% network scalability.
-
+6. When the JDBC driver blocks on I/O, the virtual thread's continuation yields, and the carrier thread is returned to the ForkJoinPool scheduler. Netty event loops are kept completely free, retaining network scalability.
 
 #### Event Loop Bypass Handler Code
 
@@ -471,12 +467,12 @@ public class ReactiveOffloadingService {
 }
 ```
 
-##### Line-by-Line Logic Walkthrough: `ReactiveOffloadingService`
+##### Code Walkthrough: `ReactiveOffloadingService`
 1. **Scheduler Instantiation**:
    - We construct `vtScheduler` using `Schedulers.fromExecutor(Executors.newVirtualThreadPerTaskExecutor())`. This bridges the reactive scheduling API with modern Java's virtual thread manager.
 2. **Callable Wrap**:
-   - We wrap the blocking logic inside `Mono.fromCallable()`. When first subscribed to, this logic runs synchronously on the calling thread.
-3. **Reactive Offloading (`publishOn()`)**:
+   - We wrap the blocking logic inside `Mono.fromCallable()`. When first subscribed to, this logic runs on the calling thread.
+3. **Reactive Offloading**:
    - By invoking `.publishOn(vtScheduler)`, we instruct Project Reactor to dispatch the execution of the callback downstream (including the blocking `performLegacyBlockingCall`) onto our virtual thread scheduler.
    - The Netty event loop thread is immediately released to handle other incoming TCP connections and network packets, preventing event loop starvation.
 
@@ -520,49 +516,49 @@ public class ParallelDbController {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `ParallelDbController`
+##### Code Walkthrough: `ParallelDbController`
 
 1. **Non-Blocking Parallel Forking**:
-   - At line 359, the REST controller instantiates a virtual thread per task executor: `vtExecutor = Executors.newVirtualThreadPerTaskExecutor()`.
-   - When the `/db-parallel` endpoint is called, lines 385 and 386 submit two database queries concurrently using `CompletableFuture.supplyAsync()`.
-   - The tasks `queryUserDb` and `queryOrderDb` are executing concurrently in two separate virtual threads.
+   - In `ParallelDbController`, the REST controller instantiates a virtual thread per task executor: `vtExecutor = Executors.newVirtualThreadPerTaskExecutor()`.
+   - When the `/db-parallel` endpoint is called, it submits two database queries concurrently using `CompletableFuture.supplyAsync()`.
+   - The tasks `queryUserDb` and `queryOrderDb` execute concurrently in two separate virtual threads.
 
-2. **Asynchronous Hand-Off to Spring Container**:
+2. **Asynchronous Hand-Off**:
    - The controller method returns `CompletableFuture<String>` directly to the Spring MVC container.
-   - Returning a future tells Spring that the HTTP request is asynchronous. The container releases the initial Tomcat request thread back to Tomcat's pool immediately, so the server can accept more incoming connections.
+   - Returning a future tells Spring that the HTTP request is asynchronous. The container releases the Tomcat request thread back to Tomcat's pool immediately, so the server can accept more connections.
 
-3. **Yielding Carrier Threads during Database Blocks**:
-   - Inside `queryUserDb()` and `queryOrderDb()`, the query operations block the executing virtual threads (simulated by `Thread.sleep()`).
-   - Rather than blocking a physical operating system thread, the virtual threads yield their carrier threads. The carrier threads are released to run other active tasks in the JVM.
-   - When the queries complete, the virtual threads are rescheduled, they resolve their futures, and the `thenCombine()` callback compiles the final result string, returning the response to the user.
+3. **Yielding Carrier Threads**:
+   - Inside `queryUserDb()` and `queryOrderDb()`, the query operations block the executing virtual threads (using `Thread.sleep()`).
+   - Rather than blocking a physical thread, the virtual threads yield their carrier threads. The carrier threads are released to run other active tasks.
+   - When the queries complete, the virtual threads are rescheduled, they resolve their futures, and the `thenCombine()` callback compiles the result, returning the response.
 
 ---
 
 ### WebClient vs. RestTemplate/RestClient under Project Loom
 
 #### The Core Dilemma: Imperative Simplicity vs. Reactive Streams
-With the finalization of Project Loom (Virtual Threads) in JDK 21+, enterprise developers face a critical architectural decision: *Should we continue using Spring WebFlux's non-blocking `WebClient`, or should we migrate back to the simpler, imperative `RestTemplate` (or the newer `RestClient`)?*
+With the finalization of Project Loom (Virtual Threads), developers face an architectural decision: *Should we continue using Spring WebFlux's non-blocking `WebClient`, or should we migrate back to the simpler, imperative `RestTemplate` (or the newer `RestClient`)?*
 
-Historically, `WebClient` was introduced because blocking platform threads inside `RestTemplate` limited scalability. Under Virtual Threads, however, blocking operations are extremely cheap because they yield the carrier thread. To make the correct design choice, we must analyze the internal mechanics of both clients.
+Historically, `WebClient` was introduced because blocking platform threads inside `RestTemplate` limited scalability. Under Virtual Threads, however, blocking operations are cheap because they yield the carrier thread. To make the correct choice, we must analyze the internal mechanics of both clients.
 
 #### 1. Concurrency Models under Virtual Threads
 * **RestTemplate / RestClient (Synchronous Blocking)**:
   - Each remote call executes synchronously inside the calling virtual thread.
   - The client makes a socket read or write call, delegating to Java's modern Socket implementation (`NioSocketImpl`).
   - When the socket blocks waiting for network packets, the virtual thread's continuation yields control.
-  - The underlying platform carrier thread is detached and returned to Tomcat's `ForkJoinPool` scheduler.
+  - The underlying platform carrier thread is detached and returned to Tomcat's scheduler.
   - The virtual thread remains suspended on the heap until the OS network card notifies the JVM selector loop that data is available.
-  - *Pros*: Extremely simple code, linear stack traces, standard try-catch exceptions, and ScopedValues/ThreadLocals are preserved natively.
-  - *Cons*: High risk of carrier thread pinning if the underlying HTTP client library uses legacy `synchronized` blocks (e.g. older versions of Apache HttpClient or third-party wrappers).
+  - *Pros*: Simple code, linear stack traces, standard try-catch exceptions, and ScopedValues/ThreadLocals are preserved naturally.
+  - *Cons*: Risk of carrier thread pinning if the underlying HTTP client library uses legacy `synchronized` blocks (e.g., older versions of Apache HttpClient).
 
 * **WebClient (Reactive Non-Blocking)**:
   - Built on Netty's event loop architecture.
-  - When a virtual thread invokes `WebClient`, the request is handed off to Netty's event loop threads (which are native platform threads).
-  - The calling virtual thread does not block on physical socket I/O; instead, Netty manages the socket connections asynchronously using OS-level selectors (`epoll` or `kqueue`).
+  - When a virtual thread invokes `WebClient`, the request is handed off to Netty's event loop threads (which are platform threads).
+  - The calling virtual thread does not block on socket I/O; Netty manages the socket connections asynchronously using OS-level selectors (`epoll` or `kqueue`).
   - If we call `.block()` on the WebClient publisher inside a virtual thread, the virtual thread is parked using `LockSupport.park()`.
   - Netty processes the response bytes in its event loop. Once Netty finishes parsing the HTTP payload, it publishes the data and triggers `LockSupport.unpark()` on the virtual thread.
-  - *Pros*: Highly optimized socket management, native streaming support (Server-Sent Events), advanced retry/backpressure mechanisms, and zero pinning risk.
-  - *Cons*: Netty's event loops are still platform threads. If you execute heavy CPU work or JSON parsing inside WebClient's reactive callbacks (e.g. `.map()`), you block the Netty event loops, starving other connections. Complex reactive APIs make debugging difficult, and context propagation (like Scoped Values) requires specialized reactive subscriber context bindings.
+  - *Pros*: Optimized socket management, native streaming support (Server-Sent Events), advanced retry/backpressure mechanisms, and zero pinning risk.
+  - *Cons*: Netty's event loops are still platform threads. If you execute heavy CPU work or JSON parsing inside WebClient's reactive callbacks (like `.map()`), you block the Netty event loops, starving other connections. Complex reactive APIs make debugging difficult, and context propagation (like Scoped Values) requires specialized reactive subscriber context bindings.
 
 #### 2. Architectural Comparison: RestTemplate vs. WebClient
 Let's compare the runtime behavior of both HTTP clients under virtual threads:
@@ -588,10 +584,10 @@ To trace how Spring Boot and Tomcat coordinate virtual threads and request inter
    - When virtual threads are enabled, Tomcat wraps its request executor in `Executors.newVirtualThreadPerTaskExecutor()`, spawning a new virtual thread to run the servlet and Spring MVC handler mapping.
 
 2. **Spring Task Executor Proxies**:
-   - When a Spring bean annotated with `@Async` is invoked, Spring intercepts the call using a JDK Dynamic Proxy or CGLIB proxy wrapper.
-   - The interceptor (`AsyncExecutionInterceptor`) retrieves the configured `Executor` bean (e.g. `TaskExecutorAdapter` wrapping a virtual thread executor).
+   - When a Spring bean annotated with `@Async` is called, Spring intercepts the call using a dynamic proxy wrapper.
+   - The interceptor (`AsyncExecutionInterceptor`) retrieves the configured `Executor` bean (such as `TaskExecutorAdapter` wrapping a virtual thread executor).
    - The proxy wraps the target method invocation inside a `Runnable` and submits it to the virtual thread executor.
-   - This ensures that transactions, security scopes (e.g. Spring Security's `SecurityContext`), and other thread-bound resources are propagated to the newly spawned virtual thread.
+   - This ensures that transactions, security scopes (like Spring Security's `SecurityContext`), and other thread-bound resources are propagated to the newly spawned virtual thread.
 
 Let's illustrate the execution flow of `WebClient` vs. `RestTemplate` in a diagram:
 
@@ -732,30 +728,29 @@ public class HttpClientCompareController {
 }
 ```
 
-##### Line-by-Line Logic Walkthrough: HTTP Client Comparison
+##### Code Walkthrough: HTTP Client Comparison
 
 1. **`JdkClientHttpRequestFactory` Injection**:
-   - At line 17, the configuration builds a `RestTemplate` using `JdkClientHttpRequestFactory`.
-   - By default, standard RestTemplate uses Java's older HTTP client (`SimpleClientHttpRequestFactory`) which blocks standard sockets. To ensure maximum compatibility and zero pinning on JDK 21/25, we override the client factory to use `java.net.http.HttpClient` via `JdkClientHttpRequestFactory`.
-   - The JDK `HttpClient` relies on native virtual thread-friendly park/unpark semantics rather than raw synchronized blocks.
+   - In `HttpClientConfig`, the configuration builds a `RestTemplate` using `JdkClientHttpRequestFactory`.
+   - By default, standard RestTemplate uses Java's older HTTP client, which blocks standard sockets. To ensure maximum compatibility and zero pinning on JDK 21/25, we override the client factory to use `java.net.http.HttpClient` via `JdkClientHttpRequestFactory`.
+   - The JDK `HttpClient` relies on virtual thread-friendly park/unpark semantics rather than raw synchronized blocks.
 
-2. **WebClient Blocking Mechanics (`executeViaWebClient()`)**:
-   - At line 68, the request executes a `webClient.get()` call. Since WebClient is reactive, it returns a `Mono<String>` immediately.
-   - At line 74, `responseMono.block()` is invoked inside the controller execution path.
-   - Under standard Spring Boot WebFlux, calling `.block()` in the event loop thread causes an `IllegalStateException` because it blocks the Netty thread.
-   - However, since this controller runs on Tomcat configured with virtual threads, the calling thread is a virtual thread. The Reactor framework detects this and parks the virtual thread via `LockSupport.park()`.
-   - The Netty event loop thread continues to run, reads the HTTP socket bytes, parses the JSON payload, and calls `LockSupport.unpark()` to reschedule our virtual thread.
+2. **WebClient Blocking Mechanics**:
+   - In `HttpClientCompareController.executeViaWebClient()`, the request executes a `webClient.get()` call. Since WebClient is reactive, it returns a `Mono<String>` immediately.
+   - The code calls `responseMono.block()` inside the controller execution path.
+   - Under standard WebFlux, calling `.block()` in the event loop thread causes an `IllegalStateException`.
+   - However, since this controller runs on Tomcat configured with virtual threads, the calling thread is a virtual thread. The Reactor framework detects this and parks the virtual thread using `LockSupport.park()`.
+   - The Netty event loop thread continues to run, reads the HTTP socket bytes, parses the payload, and calls `LockSupport.unpark()` to reschedule our virtual thread.
    - The carrier thread is returned to Tomcat's ForkJoinPool immediately when parked, ensuring no carrier threads are frozen.
 
-3. **Concurrency Fan-out (`executeParallel()`)**:
-   - At line 83, `/parallel` receives a request.
-   - It forks two concurrent tasks using `CompletableFuture.supplyAsync()` passed with `vtExecutor`.
-   - Both HTTP calls are executed in parallel on two separate virtual threads. Both block waiting for network sockets.
+3. **Concurrency Fan-out**:
+   - In `executeParallel()`, the method forks two concurrent tasks using `CompletableFuture.supplyAsync()` passed with `vtExecutor`.
+   - Both HTTP calls are executed in parallel on two separate virtual threads, and both block waiting for network sockets.
    - The carrier threads are yielded and remain available to execute other incoming requests. Once both HTTP responses arrive, the results are merged and returned, illustrating a clean, non-reactive way to execute concurrent HTTP calls.
 
 ---
 
-
+## 2. Quarkus Integration
 
 Quarkus uses **Vert.x** as its core reactive event-loop engine. In a reactive system, blocking the event loop is unacceptable. Quarkus addresses this by integrating virtual threads directly with Vert.x, offloading blocking operations from event loops to virtual threads.
 
@@ -830,18 +825,18 @@ class ReactiveHelloService {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: Quarkus Virtual Thread Resources
+##### Code Walkthrough: Quarkus Virtual Thread Resources
 
-1. **Quarkus Standard Resource Routing (`QuarkusResource`)**:
-   - The class is annotated with JAX-RS path `@Path("/quarkus-vt")`. Under Quarkus defaults, endpoints are processed directly on Netty's reactive event loop.
-   - At line 434, the method is annotated with `@RunOnVirtualThread`.
+1. **Quarkus Standard Resource Routing**:
+   - The class `QuarkusResource` is annotated with JAX-RS path `@Path("/quarkus-vt")`. Under Quarkus defaults, endpoints are processed directly on Netty's reactive event loop.
+   - The method is annotated with `@RunOnVirtualThread`.
    - When a client issues a GET request, Quarkus intercepts the invocation, takes it off the Netty event loop thread, and executes the body of `handleRequest()` inside a newly allocated virtual thread.
    - The call to `performBlockingNetworkCall()` executes `Thread.sleep(200)`. Because it is executing on a virtual thread, the thread yields the carrier thread, allowing Netty to process other network packets.
 
-2. **Reactive and Imperative Bridging (`QuarkusReactiveVtResource`)**:
-   - The endpoint `/quarkus-reactive-vt` is annotated with `@RunOnVirtualThread`.
-   - At line 469, the method executes `helloService.fetchMessage()`, which returns a Mutiny reactive stream object `Uni<String>`.
-   - Instead of subscribing with callback hooks (e.g. `subscribe().with(...)`), the virtual thread calls Mutiny's blocking retrieval: `.await().atMost(Duration.ofSeconds(2))`.
+2. **Reactive and Imperative Bridging**:
+   - The endpoint `/quarkus-reactive-vt` in `QuarkusReactiveVtResource` is annotated with `@RunOnVirtualThread`.
+   - The method executes `helloService.fetchMessage()`, which returns a Mutiny reactive stream object `Uni<String>`.
+   - Instead of subscribing with callback hooks (like `subscribe().with(...)`), the virtual thread calls Mutiny's blocking retrieval: `.await().atMost(Duration.ofSeconds(2))`.
    - The thread blocks until the Uni completes. Because this thread is a virtual thread, blocking is lightweight and has no platform-level thread resource cost. This allows developers to consume reactive libraries using simple, imperative, blocking style.
 
 ---
@@ -885,20 +880,20 @@ public class JakartaResource {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `JakartaResource`
+##### Code Walkthrough: `JakartaResource`
 
 1. **Managed Executor Declaration**:
-   - At line 532, the class is annotated with `@ManagedExecutorDefinition`. This declares a concurrent executor resource managed directly by the Jakarta EE container.
+   - In `JakartaResource`, the class is annotated with `@ManagedExecutorDefinition`. This declares a concurrent executor resource managed directly by the Jakarta EE container.
    - The JNDI name is configured as `"java:module/concurrent/virtual-executor"`.
-   - The key configuration is `virtual = true` (finalized in Jakarta Concurrency 3.1). This tells the application server (e.g. Open Liberty, WildFly) to allocate virtual threads when executing tasks submitted to this executor.
+   - The key configuration is `virtual = true` (finalized in Jakarta Concurrency 3.1). This tells the application server (such as Open Liberty or WildFly) to allocate virtual threads when executing tasks submitted to this executor.
    - The qualifier is set to `VirtualExecutor.class` to bind standard CDI injections.
 
 2. **Resource Injection**:
-   - Inside `JakartaResource`, lines 540-542 declare a `ManagedExecutorService` field annotated with `@Inject` and `@VirtualExecutor`.
+   - Inside `JakartaResource`, a `ManagedExecutorService` field is annotated with `@Inject` and `@VirtualExecutor`.
    - The CDI container matches the qualifiers and injects the virtual-thread-backed managed executor.
 
-3. **Task submission**:
-   - At line 547, the endpoint executes `executor.submit(...)`.
+3. **Task Submission**:
+   - The endpoint executes `executor.submit(...)`.
    - The container spawns a new virtual thread, runs the callback, prints the current thread's name, and returns the response.
    - The JAX-RS handler thread blocks on the return of `Future.get()`. If the handler is executing on a virtual thread, it yields the carrier thread, guaranteeing high efficiency across the application stack.
 
@@ -908,9 +903,9 @@ public class JakartaResource {
 To map the qualifier bean to the defined executor, you declare an interface qualifier:
 
 ```java
-import jakarta.inject.Qualifier;
 import java.lang.annotation.Retention;
 import java.lang.annotation.Target;
+import jakarta.inject.Qualifier;
 import static java.lang.annotation.ElementType.*;
 import static java.lang.annotation.RetentionPolicy.RUNTIME;
 
@@ -926,7 +921,7 @@ public @interface VirtualExecutor {}
 
 1. **Replace Bounded Thread Pools**: Remove fixed pools (`Executors.newFixedThreadPool()`) for I/O-bound tasks and replace them with `Executors.newVirtualThreadPerTaskExecutor()`.
 2. **Maintain Connection Limits**: Do not scale database connection pool sizes to match the number of virtual threads. Use semaphores or rate limiters.
-3. **Use Semaphores for Throttling**: Bounding concurrency protect backend APIs:
+3. **Use Semaphores for Throttling**: Bounding concurrency protects backend APIs:
    ```java
    private final Semaphore rateLimiter = new Semaphore(10); // Max 10 concurrent HTTP calls
    ```
@@ -1004,17 +999,16 @@ class BenchmarkController {
 #### Step-by-Step Walkthrough: `Lab71Application`
 
 1. **Bootstrap and Executor Mapping**:
-   - The spring boot application is initialized with `@SpringBootApplication`.
-   - Inside `BenchmarkController`, at line 635, we manually create a virtual thread per task executor: `vtExecutor = Executors.newVirtualThreadPerTaskExecutor()`.
-   - When requests hit `/sequential`, line 641 and 642 invoke `callSlowService` sequentially on the HTTP request handler thread.
-   - The thread blocks on each call for 1000ms. Since the calls are sequential, the total elapsed time printed is $\approx 2000$ms.
+   - The Spring Boot application starts.
+   - Inside `BenchmarkController`, we manually create a virtual thread per task executor: `vtExecutor = Executors.newVirtualThreadPerTaskExecutor()`.
+   - When requests hit `/sequential`, the code invokes `callSlowService` sequentially on the HTTP request handler thread.
+   - The thread blocks on each call for 1000ms, resulting in a total elapsed time of $\approx 2000$ms.
 
 2. **Parallel Task Forking with CompletableFuture**:
-   - When requests hit `/parallel` (line 648), the handler thread executes `CompletableFuture.supplyAsync()` twice, passing the queries and our virtual thread executor.
+   - When requests hit `/parallel`, the handler thread executes `CompletableFuture.supplyAsync()` twice, passing the queries and our virtual thread executor.
    - Two separate virtual threads are spawned. Each virtual thread calls `callSlowService()`.
    - The threads block concurrently on `Thread.sleep(1000)`. Because they run concurrently, the actual blocking occurs in parallel, and both threads finish after $\approx 1000$ms.
-   - Line 654 invokes `CompletableFuture.allOf(task1, task2).join()`, which blocks the handler thread until both virtual threads have completed.
-   - The total elapsed time is $\approx 1000$ms.
+   - The code calls `CompletableFuture.allOf(task1, task2).join()`, which blocks the handler thread until both virtual threads have completed, resulting in a total elapsed time of $\approx 1000$ms.
 
 3. **Under the Hood Tomcat Thread Release**:
    - If `spring.threads.virtual.enabled=true` is enabled, the Tomcat request handler thread itself is a virtual thread.
@@ -1084,18 +1078,18 @@ public class QuarkusLabResource {
 #### Step-by-Step Walkthrough: `QuarkusLabResource`
 
 1. **Endpoint Routing and Virtual Thread Assignment**:
-   - The REST endpoint is exposed at JAX-RS path `/quarkus-benchmark` (line 699).
-   - The class method `processParallelApiRequests` is annotated with `@RunOnVirtualThread` (line 709).
-   - When an HTTP client hits this route, Quarkus routes the request to a virtual thread. The print statement at line 712 validates that the executor assigned is a virtual thread.
+   - The REST endpoint is exposed at JAX-RS path `/quarkus-benchmark`.
+   - The class method `processParallelApiRequests` is annotated with `@RunOnVirtualThread`.
+   - When an HTTP client hits this route, Quarkus routes the request to a virtual thread. The print statement validates that the executor assigned is a virtual thread.
 
 2. **Concurrent Request Forking using CompletableFuture**:
-   - Inside the method, lines 714-716 spawn three asynchronous operations (`req1`, `req2`, `req3`) to query the external HTTP benchmark service `https://httpbin.org/delay/1` (which introduces a 1-second delay).
-   - These requests run concurrently on separate virtual threads using `vtExecutor = Executors.newVirtualThreadPerTaskExecutor()`.
-   - The HTTP calls are initiated using Java's standard `HttpClient` (`httpClient.send()` at line 741).
+   - Inside the method, the code spawns three asynchronous operations (`req1`, `req2`, `req3`) to query the external HTTP benchmark service `https://httpbin.org/delay/1` (which introduces a 1-second delay).
+   - These requests run concurrently on separate virtual threads using `vtExecutor`.
+   - The HTTP calls are initiated using Java's standard `HttpClient` (`httpClient.send()`).
 
 3. **Yielding and Rescheduling inside HttpClient**:
-   - Java 21's standard `HttpClient` is designed to be virtual-thread-aware. When it performs a blocking socket write/read, the executing virtual thread yields the carrier thread, allowing other requests to run.
-   - Line 719 joins the three futures: `CompletableFuture.allOf(...)`.
+   - Java's standard `HttpClient` is designed to be virtual-thread-aware. When it performs a blocking socket write/read, the executing virtual thread yields the carrier thread, allowing other requests to run.
+   - The code joins the three futures: `CompletableFuture.allOf(...)`.
    - The coordinator virtual thread blocks at the `join()` call, yielding its carrier thread.
    - Once all three requests complete, the virtual thread is rescheduled, reads the results via `req.join()`, compiles the list, and returns the response. The Vert.x event loop is never blocked, maintaining high reactivity.
 
@@ -1135,7 +1129,7 @@ quarkus.virtual-threads.enabled=true
 
 ### Deep Dive: Database Connection Pool (HikariCP) Management and Sizing under Virtual Threads
 
-While Project Loom allows applications to spawn millions of virtual threads, it does not magically scale the database. Databases are bounded by physical resources: CPU cores, disk I/O, lock contention, and the size of their connection pools. Transitioning to virtual threads changes how connection pools (such as **HikariCP**) behave, introducing unique performance risks.
+While Project Loom allows applications to spawn millions of virtual threads, it does not scale the database. Databases are bounded by physical resources: CPU cores, disk I/O, lock contention, and the size of their connection pools. Transitioning to virtual threads changes how connection pools (such as **HikariCP**) behave, introducing performance risks.
 
 #### 1. How HikariCP Works Internally (The ConcurrentBag)
 To understand connection pool bottlenecks under Loom, you must understand how HikariCP coordinates connection access. At its core is `ConcurrentBag`, a lock-free, thread-safe pool container:
@@ -1155,7 +1149,7 @@ To understand connection pool bottlenecks under Loom, you must understand how Hi
 ```
 
 When a thread calls `dataSource.getConnection()`, HikariCP performs a three-step search:
-1. **ThreadLocal Cache Look-up**: It first checks the current thread's private `threadList` (a specialized list structure called `FastList` stored inside a `ThreadLocal`). If the thread previously held a connection and returned it, it is reused immediately, avoiding shared queue synchronization.
+1. **ThreadLocal Cache Look-up**: It first checks the current thread's private cache (a specialized list structure called `FastList` stored inside a `ThreadLocal`). If the thread previously held a connection and returned it, it is reused immediately, avoiding shared queue synchronization.
 2. **Shared Queue Scan**: If the thread-local cache is empty, it scans a shared list (`sharedList`, backed by `CopyOnWriteArrayList`). It uses CAS operations to borrow an idle connection.
 3. **Synchronous Hand-off**: If no connections are available, the borrowing thread registers its request on a hand-off queue (backed by `SynchronousQueue`) and blocks.
 
@@ -1244,47 +1238,6 @@ public void executeSafeDatabaseQuery() {
     }
 }
 ```
-
-## 7. Beginner-Friendly Concept: The Restaurant Analogy of Web Server Concurrency
-
-To understand why modern web frameworks are integrating virtual threads, let us look at a simple, real-world restaurant analogy.
-
-Imagine a popular local restaurant processing dinner orders. Each order involves:
-1. A customer placing an order with a waiter.
-2. The waiter taking the order to the kitchen.
-3. The kitchen preparing the food (simulating external database queries or downstream API calls).
-4. The waiter delivering the food to the table.
-
-Web frameworks handle these orders in three different ways:
-
-### 1. The Traditional Servlet Model: Spring MVC / Tomcat (One Waiter Per Table)
-In a traditional Spring Boot application without virtual threads:
-- **The Waiters**: Platform Threads. Each waiter is assigned to exactly one table.
-- **The Process**:
-  - A waiter takes the customer's order and walks to the kitchen.
-  - While the kitchen is cooking the food, the waiter stands outside the kitchen window, waiting. They cannot serve any other table.
-  - If the restaurant only has 200 waiters, they can only serve 200 tables at the same time.
-  - If a 201st table arrives, they must wait outside in a long queue (request latency spike), even if the kitchen is completely idle and there is plenty of food.
-  - To serve more tables, the restaurant must hire more waiters, but waiters are expensive, take up space, and eat food (monolithic stack RAM overhead).
-
-### 2. The Reactive Model: Spring WebFlux / Netty (The Event Loop Waiter)
-To solve this, reactive programming changes the waiter's behavior:
-- **The Process**:
-  - The restaurant only hires 4 highly efficient waiters (Event Loop Threads, matching CPU cores).
-  - A waiter takes Table 1's order, drops it off at the kitchen, and immediately turns around to take Table 2's order. They never stand around waiting.
-  - When Table 1's food is cooked, the chef rings a bell (OS socket notification). The first available waiter grabs the plate and delivers it.
-  - **The Catch**: This is highly efficient and scales to thousands of tables, but the waiters must *never* stop moving. If a customer asks the waiter to manually calculate a complex split bill (a blocking database query or long computation), and the waiter stands there calculating it for 10 seconds, the entire restaurant service freezes because there are only 4 waiters in the room. This is Netty event loop starvation.
-
-### 3. The Loom Model: Spring Boot + Virtual Threads (Desks with Self-Service Runners)
-Project Loom combines the simplicity of the first model with the scalability of the second:
-- **The Process**:
-  - Each customer is given a direct intercom button to the kitchen (Virtual Thread). Every request runs independently.
-  - The restaurant only has 4 physical food runners (Carrier platform threads).
-  - When the kitchen finishes cooking, a food runner grabs the plate, runs to the table, drops it off, and runs back.
-  - If a customer needs to wait, they wait at their table. They do not hold up a waiter or a runner.
-  - This allows the restaurant to serve 100,000 tables simultaneously. The developer writes code as if they have their own dedicated waiter (simple, linear, synchronous code), but the underlying system shares the food runners automatically (M-to-N cooperative scheduling), giving you reactive scaling without the complexity of callback streams.
-
----
 
 ### Knowledge Check
 
@@ -1390,10 +1343,10 @@ How does Quarkus ensure that CDI request scopes (like transaction context or sec
 
 #### Question 11: Pinning Diagnostic JFR Tracing
 Which JFR event is monitored to detect carrier thread pinning duration in production environments?
-- A. `jdk.ThreadPark`
-- B. `jdk.VirtualThreadPinned`
-- C. `jdk.VirtualThreadStarvation`
-- D. `jdk.ThreadPinningException`
+- A) `jdk.ThreadPark`
+- B) `jdk.VirtualThreadPinned`
+- C) `jdk.VirtualThreadStarvation`
+- D) `jdk.ThreadPinningException`
 
 *Answer*: **B**
 - *Explanation*: The `jdk.VirtualThreadPinned` event is recorded by the JVM whenever a virtual thread blocks while pinned to its carrier thread (due to monitor locks or native stack frames). Key attributes include `duration` and `stackTrace` to trace the pinning code block.
@@ -1466,7 +1419,7 @@ When protecting a database connection pool from timeouts under a load of 20,000 
 - D) None of the above.
 
 *Answer*: **B**
-- *Explanation*: The Semaphore acts as a gatekeeper. By setting its permit count close to the database connection pool limit, virtual threads are throttled in the application layer. Blocked threads yield their carrier threads, keeping resource usage low and preventing Hikari connection acquisition timeouts.
+- *Explanation*: The Semaphore acts as a gatekeeper. By setting its permit count close to the database connection pool limit, virtual threads are throttled in the application layer. Blocked virtual threads yield their carrier threads, keeping resource usage low and preventing Hikari connection acquisition timeouts.
 
 #### Question 19: Analysing VirtualThreadPinned JFR Events in Spring Boot
 During a production run of a Spring Boot service, JFR captures several `jdk.VirtualThreadPinned` events. What action should the developer take to locate and resolve the issue?
@@ -1488,10 +1441,50 @@ How does Undertow's protocol executor adaptation under Spring Boot 3.2+ differ f
 *Answer*: **B**
 - *Explanation*: Spring Boot 3.2+ provides integrations for all major embedded servlet containers. Enabling virtual threads replaces Tomcat's protocol handlers and Undertow's request workers with virtual thread task executors, ensuring high request concurrency across both servlet engines.
 
+---
+
+## 7. Beginner-Friendly Concept: The Restaurant Analogy of Web Server Concurrency
+
+To understand why modern web frameworks are integrating virtual threads, let us look at an office or restaurant analogy.
+
+Imagine a popular restaurant processing dinner orders. Each order involves:
+1. A customer placing an order with a waiter.
+2. The waiter taking the order to the kitchen.
+3. The kitchen preparing the food (simulating external database queries or downstream API calls).
+4. The waiter delivering the food to the table.
+
+Web frameworks handle these orders in three different ways:
+
+### 1. The Traditional Servlet Model: Spring MVC / Tomcat (One Waiter Per Table)
+In a traditional Spring Boot application without virtual threads:
+- **The Waiters**: Platform Threads. Each waiter is assigned to exactly one table.
+- **The Process**:
+  - A waiter takes the customer's order and walks to the kitchen.
+  - While the kitchen is cooking the food, the waiter stands outside the kitchen window, waiting. They cannot serve any other table.
+  - If the restaurant only has 200 waiters, they can only serve 200 tables at the same time.
+  - If a 201st table arrives, they must wait outside in a long queue (causing latency spikes), even if the kitchen is idle.
+  - To serve more tables, the restaurant must hire more waiters, but waiters are expensive, take up space, and eat food (large thread stack overhead).
+
+### 2. The Reactive Model: Spring WebFlux / Netty (The Event Loop Waiter)
+To solve this, reactive programming changes the waiter's behavior:
+- **The Process**:
+  - The restaurant only hires 4 highly efficient waiters (Event Loop Threads, matching CPU cores).
+  - A waiter takes Table 1's order, drops it off at the kitchen, and immediately turns around to take Table 2's order. They never stand around waiting.
+  - When Table 1's food is cooked, the chef rings a bell (OS socket notification). The first available waiter grabs the plate and delivers it.
+  - **The Catch**: This is highly efficient and scales to thousands of tables, but the waiters must *never* stop moving. If a customer asks the waiter to calculate a complex split bill (a blocking database query or long computation), and the waiter stands there calculating it for 10 seconds, the entire restaurant service freezes because there are only 4 waiters in the room. This is event loop starvation.
+
+### 3. The Loom Model: Spring Boot + Virtual Threads (Desks with Self-Service Runners)
+Project Loom combines the simplicity of the first model with the scalability of the second:
+- **The Process**:
+  - Each customer is given a direct intercom button to the kitchen (Virtual Thread). Every request runs independently.
+  - The restaurant only has 4 physical food runners (Carrier platform threads).
+  - When the kitchen finishes cooking, a food runner grabs the plate, runs to the table, drops it off, and runs back.
+  - If a customer needs to wait, they wait at their table. They do not hold up a waiter or a runner.
+  - This allows the restaurant to serve 100,000 tables simultaneously. The developer writes code as if they have their own dedicated waiter (simple, linear, synchronous code), but the underlying system shares the food runners automatically (M-to-N cooperative scheduling), giving you reactive scaling without the complexity of callback streams.
 
 ---
 
-### 8. Spring Boot Tomcat vs. Spring WebFlux Event Loop Performance Comparison
+## 8. Spring Boot Tomcat vs. Spring WebFlux Event Loop Performance Comparison
 
 With the introduction of virtual threads, developers often ask: *“Is Spring WebFlux and reactive programming still necessary, or can we build everything using Spring MVC and Virtual Threads?”*
 
@@ -1522,7 +1515,7 @@ Imagine a gateway service that receives client REST requests, calls a downstream
 - *Verdict*: Reactive and Virtual Threads scale smoothly; Platform Threads experience severe queuing delays.
 
 ##### Phase 3: High Concurrency (10,000 Concurrent Users)
-- **Tomcat Platform**: The queue overflows, resulting in socket connection timeouts, drop requests, and high CPU usage due to context-switch thrashing. The application becomes unresponsive.
+- **Tomcat Platform**: The queue overflows, resulting in socket connection timeouts, dropped requests, and high CPU usage due to context-switch thrashing. The application becomes unresponsive.
 - **Spring WebFlux**: Latency remains flat at **100ms**. Netty event loops handle the connections efficiently. Memory usage remains stable at **~200MB**.
 - **Tomcat Virtual Threads**: Tomcat spawns 10,000 virtual threads. All 10,000 block on network I/O, yielding carriers. Latency remains flat at **100ms**. Memory usage rises slightly to **~320MB** (allocating 10,000 heap stacks).
 - *Verdict*: Both Reactive and Virtual Threads achieve identical scalability, but Virtual Threads do so using simple, sequential blocking code.
@@ -1541,9 +1534,4 @@ Imagine a gateway service that receives client REST requests, calls a downstream
 
 #### Architectural Recommendation
 - Use **Tomcat Virtual Threads (Spring MVC)** for standard enterprise web applications, REST APIs, and CRUD microservices. It matches the scalability of WebFlux while keeping the programming model simple, readable, and easy to debug.
-- Use **Spring WebFlux (Reactive)** when you are building streaming applications (e.g. WebSockets, Server-Sent Events, or real-time event brokers) where connection states are long-lived and require custom backpressure pipelines.
-
----
-
-
-
+- Use **Spring WebFlux (Reactive)** when you are building streaming applications (such as WebSockets, Server-Sent Events, or real-time event brokers) where connection states are long-lived and require custom backpressure pipelines.

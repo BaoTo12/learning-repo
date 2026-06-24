@@ -20,9 +20,9 @@ By the end of this module you will be able to:
 
 ## 10.1 Why Lock-Free?
 
-A **lock-based** algorithm uses mutual exclusion: while Thread A holds a lock, all other threads block, burning CPU in the OS scheduler and generating context switches.
+A **lock-based** algorithm uses mutual exclusion. While one thread holds a lock, other threads block and wait, causing context switches.
 
-A **lock-free** algorithm guarantees that at least one thread makes progress at all times, regardless of how other threads are scheduled. If Thread A is preempted mid-operation, Thread B simply retries using the unchanged state, rather than blocking.
+A **lock-free** algorithm guarantees that at least one thread makes progress. If one thread is paused, other threads can continue by retrying their operations.
 
 ```
 Lock-based under high contention:
@@ -40,18 +40,18 @@ Lock-free under high contention (CAS-based):
   Cost: CPU cycles for retry loops (all in user space, no kernel involvement)
 ```
 
-**When lock-free wins:** High contention, short critical sections, many cores.
-**When lock-free loses:** Complex multi-word operations (locks remain simpler), very low contention (lock overhead is negligible), writes >> reads (CAS retries dominate).
+**Lock-free is useful for:** high contention, short operations, and many CPU cores.
+**Lock-free is less useful for:** complex operations, very low contention, or when writes outnumber reads.
 
 ---
 
 ## 10.2 Compare-And-Swap (CAS) — The Foundation
 
-CAS is a single atomic CPU instruction (`LOCK CMPXCHG` on x86, `STLXR`/`LDAXR` on ARM) that atomically:
+CAS is an atomic CPU instruction that:
 1. Reads a memory location
 2. Compares it to an expected value
-3. If they match: writes a new value and returns `true`
-4. If they don't match: does nothing and returns `false`
+3. If they match, writes a new value and returns `true`
+4. If they do not match, does nothing and returns `false`
 
 ```
 CAS(address, expected, new_value):
@@ -67,13 +67,13 @@ CAS(address, expected, new_value):
 ```java
 import java.util.concurrent.atomic.AtomicReference;
 
-// Classic lock-free counter using AtomicInteger
+// Atomic counter
 AtomicInteger counter = new AtomicInteger(0);
 counter.incrementAndGet();                    // Atomic CAS-based increment
 counter.compareAndSet(expected, newValue);    // Explicit CAS
 counter.getAndUpdate(x -> x * 2);            // CAS loop with function
 
-// Modern: VarHandle CAS (lower overhead, more control)
+// VarHandle CAS
 import java.lang.invoke.*;
 
 class AtomicNode {
@@ -112,7 +112,7 @@ public class LockFreeStack<T> {
             currentHead = head.get();          // (1) Read current head
             newNode = new Node<>(value, currentHead); // (2) Create node pointing to it
         } while (!head.compareAndSet(currentHead, newNode)); // (3) CAS: retry if head changed
-        // If another thread pushed between (1) and (3): CAS fails, loop retries
+        // If another thread updates the head first, the CAS fails and the loop retries
     }
 
     public T pop() {
@@ -123,14 +123,10 @@ public class LockFreeStack<T> {
         } while (!head.compareAndSet(currentHead, currentHead.next())); // (2) CAS: remove head
         return currentHead.value();
     }
-
-    // Linearization point: push → successful CAS at (3)
-    //                       pop  → successful CAS at (2)
-    // Every operation appears to take effect at exactly one instant
 }
 ```
 
-**Thread-safety proof:** The only mutable shared state is `head`. It is only ever updated via CAS. If Thread A and Thread B both try to push simultaneously, only one CAS succeeds. The loser re-reads the new head (which now includes the winner's node) and retries — no data is lost, no thread blocks.
+**Thread-safety proof:** The only shared variable is `head`, which is updated using CAS. If multiple threads try to update it at the same time, only one succeeds. Other threads retry without blocking.
 
 ---
 
@@ -196,22 +192,22 @@ public class LockFreeQueue<T> {
 }
 ```
 
-**Key insight — helping:** If Thread A starts advancing the tail but gets preempted, Thread B detects the lagging tail and helps advance it before its own operation. This ensures the queue always makes progress even if individual threads stall.
+**Key insight — helping:** If a thread is paused while advancing the tail, another thread can help advance it. This ensures the queue always makes progress.
 
 ---
 
 ## 10.5 The ABA Problem and `AtomicStampedReference`
 
-The ABA problem: Thread A reads value `A`, gets preempted. Thread B changes value `A → B → A`. Thread A resumes, CAS sees `A` again and succeeds — but the state has changed in a way CAS cannot detect.
+The ABA problem occurs when a thread reads value `A` and is paused. Another thread changes the value from `A` to `B` and back to `A`. When the first thread resumes, CAS succeeds because the value is `A`, but the underlying state has changed.
 
 ```
 Thread A: reads head = Node@100 (value=A)
 Thread B: pops Node@100, pops Node@200 (both gone), pushes new Node@100 (same address, value=A)
-Thread A: CAS(head, Node@100, newNode) → SUCCEEDS even though the stack state changed!
-           The old Node@200 is now a dangling reference in newNode.next — memory corruption!
+Thread A: CAS(head, Node@100, newNode) → SUCCEEDS even though the stack state changed
+           This can cause memory corruption.
 ```
 
-**Fix: `AtomicStampedReference`** (version counter alongside the reference)
+**Fix: `AtomicStampedReference`** (uses a version counter alongside the reference)
 
 ```java
 import java.util.concurrent.atomic.AtomicStampedReference;
@@ -232,20 +228,20 @@ class ABASafeStack<T> {
         } while (!head.compareAndSet(
                 currentHead, newNode,
                 stamp[0], stamp[0] + 1));       // Increment stamp on each CAS
-        // ABA is now impossible: even if address matches, stamp won't
+        // The stamp prevents the ABA problem even if the reference address matches.
     }
 }
 ```
 
-**Production note:** In garbage-collected languages like Java, the classic ABA problem (address reuse) is less common because GC prevents immediate address recycling. However, logical ABA (same object recycled via object pool) still requires stamped references.
+**Production note:** In Java, the classic ABA problem is rare because garbage collection prevents immediate memory reuse. However, reusing objects from a pool can still cause this issue, requiring stamped references.
 
 ---
 
 ## 10.6 `LongAdder` vs `AtomicLong` — Striped Counters
 
-`AtomicLong` uses a single CAS on one memory location. Under very high contention (hundreds of threads incrementing simultaneously), threads spin in retry loops competing for the same cache line.
+`AtomicLong` uses a single CAS on one memory location. Under high contention, threads spin in retry loops competing for the same cache line.
 
-`LongAdder` uses **cell striping**: it distributes updates across multiple `Cell` objects (one per contending thread), summing them only when `sum()` is called.
+`LongAdder` uses **cell striping** to distribute updates across multiple cells, summing them only when `sum()` is called.
 
 ```java
 import java.util.concurrent.atomic.LongAdder;
@@ -255,23 +251,23 @@ import java.util.concurrent.atomic.AtomicLong;
 AtomicLong atomic = new AtomicLong(0);
 LongAdder adder = new LongAdder();
 
-// Thread 1–64: atomic.incrementAndGet()  →  All fight for same cache line
+// Thread 1–64: atomic.incrementAndGet()  →  All threads compete for the same cache line
 //   → Heavy CAS retry loop → ~15 million ops/sec on 16-core machine
 
-// Thread 1–64: adder.increment()  →  Distributed across ~16 Cell objects
+// Thread 1–64: adder.increment()  →  Updates are distributed across cells
 //   → Minimal contention → ~200 million ops/sec on same machine
 
 // Reading:
 long atomicValue = atomic.get();          // O(1), always exact
-long adderValue = adder.sum();            // O(cells), approximate (cells updated concurrently)
+long adderValue = adder.sum();            // O(cells), approximate under concurrent updates
 long adderReset = adder.sumThenReset();   // Atomic sum + reset to 0
 ```
 
 **When to use which:**
 
-| | `AtomicLong` | `LongAdder` |
+| Feature | `AtomicLong` | `LongAdder` |
 | :--- | :--- | :--- |
-| **Single writer** | ✓ | ✓ |
+| **Single writer** | ✓ Better | ✓ OK |
 | **Few threads (< 8)** | ✓ Better | ✓ OK |
 | **Many threads (> 16)** | Contention | ✓ Much better |
 | **Exact read at any time** | ✓ | ✗ Approximate |
@@ -284,13 +280,13 @@ long adderReset = adder.sumThenReset();   // Atomic sum + reset to 0
 LongAdder internals:
 
   base (volatile long) ← Used when no contention
-  cells (Cell[]) ← Lazily created, sized to power of 2
+  cells (Cell[]) ← Created lazily
 
   increment():
-    1. Try to CAS base directly (fast path, no contention)
-    2. If CAS fails: probe thread's cell slot (threadLocalRandomProbe % cells.length)
-    3. CAS the chosen cell
-    4. If cell CAS fails: rehash probe, try another cell or expand cells array
+    1. Try to update the base directly.
+    2. If the update fails, choose a cell based on the thread.
+    3. CAS the chosen cell.
+    4. If the cell update fails, try another cell or expand the cells.
 
   sum(): base + sum(cells[i].value for all i)
 ```
@@ -299,10 +295,10 @@ LongAdder internals:
 
 ## 10.7 `StampedLock` — Optimistic Read Locking
 
-`StampedLock` (Java 8+) provides three modes:
+`StampedLock` provides three modes:
 - **Write lock**: Exclusive, like `ReentrantReadWriteLock` write lock
 - **Read lock**: Shared, allows concurrent readers, blocks writers
-- **Optimistic read**: Zero overhead — no actual lock, just a version check
+- **Optimistic read**: No lock is acquired, just a version check
 
 ```java
 import java.util.concurrent.locks.StampedLock;
@@ -324,12 +320,12 @@ class Point {
 
     // Optimistic read: zero-overhead path (no actual lock acquired)
     double distanceFromOrigin() {
-        long stamp = lock.tryOptimisticRead(); // Returns current version stamp
-        double currentX = x;                   // Read without holding any lock
+        long stamp = lock.tryOptimisticRead(); // Returns a version stamp
+        double currentX = x;                   // Read variables without holding a lock
         double currentY = y;
 
-        if (!lock.validate(stamp)) {           // Check: did a writer modify during read?
-            // A write occurred — fall back to a real read lock
+        if (!lock.validate(stamp)) {           // Check if a writer modified the data
+            // If a write occurred, fall back to a read lock
             stamp = lock.readLock();
             try {
                 currentX = x;
@@ -341,7 +337,7 @@ class Point {
         return Math.sqrt(currentX * currentX + currentY * currentY);
     }
 
-    // Read lock: use when optimistic read is too risky (e.g., complex multi-field reads)
+    // Use a read lock when reading complex state
     String getCoordinates() {
         long stamp = lock.readLock();
         try {
@@ -359,33 +355,32 @@ class Point {
 Scenario: 95% reads, 5% writes, 16 threads
 
 ReentrantReadWriteLock:
-  Read lock:  CAS on reader count + potential wait if writer pending → ~50ns/op
+  Read lock requires a CAS and blocks if a writer is active. → ~50ns/op
   Write lock: Exclusive acquire → ~200ns/op
 
 StampedLock (optimistic):
-  Optimistic read: 2 instructions (tryOptimisticRead + validate) → ~5ns/op
+  Optimistic read uses a version check. → ~5ns/op
   Optimistic retry rate: 5% → avg cost ~10ns/op (weighted)
   Write lock: Same as RRW → ~200ns/op
 ```
 
-**Warning:** `StampedLock` is NOT reentrant. A thread that holds a stamp and tries to acquire another lock will deadlock. Do not use inside recursive code.
+**Warning:** `StampedLock` is not reentrant. Acquiring the lock recursively will cause a deadlock. Do not use inside recursive code.
 
 ---
 
 ## 10.8 `ConcurrentHashMap` Internals
 
-`ConcurrentHashMap` in Java 8+ uses a hybrid strategy: **lock-free for most operations, bucket-level synchronization only on structural changes**.
+`ConcurrentHashMap` is lock-free for most operations, using synchronization only at the bucket level for updates.
 
 ### Read Path (Lock-Free)
 
 ```java
 // get() is completely lock-free:
 // 1. Compute hash → find bucket index
-// 2. Read bucket head via volatile read (guaranteed visibility)
+// 2. Read the bucket head
 // 3. Traverse linked list or tree for key match — no locks
 // 
-// The entire read path uses volatile reads and CAS-inserted nodes.
-// Zero lock acquisition for ANY read operation.
+// Reads do not acquire locks.
 
 ConcurrentHashMap<String, Integer> map = new ConcurrentHashMap<>();
 // get() → zero lock overhead regardless of concurrent writers
@@ -397,17 +392,13 @@ Integer value = map.get("key");
 ```java
 // put() algorithm:
 // 1. Hash key → find bucket
-// 2. If bucket is EMPTY: CAS a new node into the array slot (lock-free!)
-// 3. If bucket is NON-EMPTY: synchronized(bucketHead) { insert/update }
-//    Only the single bucket is locked, not the entire map
+// 2. If the bucket is empty, insert the node using CAS.
+// 3. If the bucket is not empty, synchronize on the bucket head.
+//    Only the target bucket is locked.
 //
 // For a map with 16 buckets: 16 independent locks
 // For a map with 512 buckets (after resize): 512 independent locks
-// → Allows ~16–512 concurrent writers simultaneously
-
-// Structural operations (resize, TreeBin conversion):
-// When a bucket exceeds 8 entries → convert to Red-Black tree (TreeBin)
-// This conversion uses synchronized(bucketHead) but is amortized rare
+// → Allows concurrent writes.
 ```
 
 ### Atomic Compound Operations
@@ -427,20 +418,19 @@ counters.merge("hits", 1, Integer::sum);
 // computeIfAbsent (lazy initialization, lock-free if bucket empty):
 Map<String, List<String>> groups = new ConcurrentHashMap<>();
 groups.computeIfAbsent("group-A", k -> new ArrayList<>()).add("item");
-// WARNING: The List itself is NOT thread-safe — use CopyOnWriteArrayList if shared
+// The list itself is not thread-safe.
 ```
 
 ### `ConcurrentHashMap` Size Counting
 
 ```java
-// size() is NOT guaranteed to be exact during concurrent modifications
+// The size is approximate during concurrent updates.
 int approxSize = map.size();
 
 // For accurate size under concurrency:
 long exactCount = map.mappingCount(); // Returns long, better for large maps
 
-// Implementation: ConcurrentHashMap uses a LongAdder-like counter
-// Incremented on put, decremented on remove — approximate until all cells summed
+// The counter is updated on changes and summed when read.
 ```
 
 ---
@@ -452,18 +442,14 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 CopyOnWriteArrayList<String> list = new CopyOnWriteArrayList<>();
 
-// Write: copies the entire underlying array, mutates the copy, replaces atomically
+// Writes copy the array, modify the copy, and replace it.
 list.add("event");
-// Cost: O(n) for every write — suitable ONLY for rare writes
+// Writes are expensive, so use this only for rare updates.
 
-// Read: uses the current snapshot — zero synchronization
-for (String s : list) { // Iterator uses a snapshot — never throws ConcurrentModificationException
+// Reads use a snapshot without synchronization.
+for (String s : list) { // Iterators use a snapshot and do not throw modification exceptions.
     System.out.println(s);
 }
-
-// Best use case: event listener registries, configuration lists
-// Reads: thousands per second
-// Writes: a few per application lifecycle
 ```
 
 ---

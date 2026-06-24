@@ -9,40 +9,40 @@
 ## Learning Objectives
 
 By the end of this module you will be able to:
-- Write correct JMH benchmarks that avoid JIT dead-code elimination and false sharing
-- Distinguish throughput benchmarks from latency (percentile) benchmarks
-- Apply Little's Law to predict and right-size thread pools
-- Measure the performance crossover point between platform threads and virtual threads
-- Identify benchmark pitfalls: coordinated omission, warmup inadequacy, measurement noise
-- Profile memory allocation in concurrent code using JMH `GC` profiler
+- Write JMH benchmarks that avoid compiler optimization errors and false sharing
+- Distinguish throughput benchmarks from latency benchmarks
+- Apply Little's Law to size thread pools
+- Measure the performance differences between platform and virtual threads
+- Identify benchmark errors like coordinated omission and inadequate warmup
+- Profile memory allocation using the JMH GC profiler
 
 ---
 
 ## 13.1 Why Micro-Benchmarking Is Hard in Java
 
-The JVM does not execute bytecode literally. It applies aggressive optimizations:
-1. **JIT compilation**: Hot methods are compiled to native code after ~10,000 invocations
-2. **Dead code elimination**: If the result is unused, the JIT removes the entire computation
-3. **Loop unrolling and constant folding**: Loops with fixed bounds are often unrolled
-4. **Escape analysis**: Objects that don't escape a method may be stack-allocated (no GC pressure)
+The JVM optimizes code in several ways:
+1. **JIT compilation**: The JVM compiles frequently run methods to native machine code.
+2. **Dead code elimination**: The compiler removes calculations if their results are not used.
+3. **Loop unrolling and constant folding**: The compiler pre-calculates constant math and simplifies loops.
+4. **Escape analysis**: If an object does not escape a method, the compiler may allocate it on the stack instead of the heap to avoid garbage collection.
 
 ```java
-// This "benchmark" is meaningless — JIT will eliminate the entire loop:
+// This benchmark is incorrect because the compiler will remove the loop:
 long start = System.nanoTime();
 for (int i = 0; i < 1_000_000; i++) {
-    int x = i * 2; // Result never used → JIT eliminates this computation entirely
+    int x = i * 2; // Unused result is removed by the compiler
 }
 long duration = System.nanoTime() - start;
-System.out.println(duration); // Will print ~0ns — you measured nothing
+System.out.println(duration); // Prints ~0ns
 
-// This "benchmark" is still wrong — no warmup, single sample:
+// This benchmark is incorrect because it lacks warmup and uses a single sample:
 long start2 = System.nanoTime();
-String result = expensiveMethod(); // Cold code path — JIT hasn't compiled it yet
+String result = expensiveMethod(); // Cold code path that is not yet compiled
 long duration2 = System.nanoTime() - start2;
-// First execution is 10–100x slower than steady-state → misleading result
+// The first run is much slower than subsequent runs, giving a misleading result.
 ```
 
-**JMH (Java Microbenchmark Harness)** solves all of these problems automatically.
+The Java Microbenchmark Harness (JMH) solves these problems.
 
 ---
 
@@ -94,7 +94,7 @@ java -jar target/benchmarks.jar -wi 5 -i 10 -f 3 -t 8 ".*CounterBenchmark.*"
 
 ## 13.3 Writing Correct JMH Benchmarks
 
-### Basic Throughput Benchmark
+### Throughput Benchmark
 
 ```java
 import org.openjdk.jmh.annotations.*;
@@ -102,18 +102,18 @@ import org.openjdk.jmh.infra.Blackhole;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.*;
 
-@BenchmarkMode(Mode.Throughput)   // Measure: operations per second
+@BenchmarkMode(Mode.Throughput)   // Measure operations per second.
 @OutputTimeUnit(TimeUnit.SECONDS)
-@State(Scope.Benchmark)           // One shared state per benchmark run
-@Warmup(iterations = 5, time = 1) // 5 warmup iterations (JIT compiles hot paths)
-@Measurement(iterations = 10, time = 1) // 10 measurement iterations
-@Fork(3)                          // Run in 3 separate JVM processes (eliminates JVM startup bias)
+@State(Scope.Benchmark)           // Share state across the benchmark.
+@Warmup(iterations = 5, time = 1) // Run 5 warmup iterations.
+@Measurement(iterations = 10, time = 1) // Run 10 measurement iterations.
+@Fork(3)                          // Run in 3 separate processes to avoid startup bias.
 public class CounterBenchmark {
 
     AtomicLong atomicLong;
     LongAdder longAdder;
 
-    @Setup(Level.Iteration) // Reset before each iteration
+    @Setup(Level.Iteration) // Reset before each iteration.
     public void setup() {
         atomicLong = new AtomicLong(0);
         longAdder = new LongAdder();
@@ -121,7 +121,7 @@ public class CounterBenchmark {
 
     @Benchmark
     public void atomicLongIncrement() {
-        atomicLong.incrementAndGet(); // Result used by JMH internally — not eliminated
+        atomicLong.incrementAndGet(); // JMH uses the result, so the compiler does not remove it.
     }
 
     @Benchmark
@@ -129,13 +129,13 @@ public class CounterBenchmark {
         longAdder.increment();
     }
 
-    // WRONG: returning void when method computes a value → JIT may eliminate computation
-    // Fix: use Blackhole or return the value
+    // Incorrect: If a method returns void, the compiler might remove the calculation.
+    // Fix: use Blackhole or return the value.
     @Benchmark
     public long atomicLongGet(Blackhole bh) {
         long val = atomicLong.get();
-        bh.consume(val); // Blackhole prevents dead-code elimination
-        return val;      // OR: return the value (JMH uses it)
+        bh.consume(val); // A Blackhole prevents the compiler from removing the code.
+        return val;      // Or return the value.
     }
 }
 ```
@@ -143,7 +143,7 @@ public class CounterBenchmark {
 ### Latency (Percentile) Benchmark
 
 ```java
-@BenchmarkMode(Mode.SampleTime)   // Sample individual operation latencies
+@BenchmarkMode(Mode.SampleTime)   // Sample individual operation latencies.
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @Warmup(iterations = 5, time = 2)
 @Measurement(iterations = 10, time = 5)
@@ -171,8 +171,8 @@ public class LockLatencyBenchmark {
         }
     }
 }
-// JMH outputs p50, p90, p99, p99.9, p99.99 latency percentiles
-// This reveals tail latency, which avg/throughput benchmarks hide
+// JMH outputs latency percentiles.
+// This reveals tail latency, which average latency and throughput benchmarks hide.
 ```
 
 **Benchmark modes:**
@@ -190,27 +190,26 @@ public class LockLatencyBenchmark {
 ## 13.4 Avoiding False Sharing in Benchmarks
 
 ```java
-// BROKEN: AtomicLong fields from different threads share a cache line
-// → false sharing invalidates cache lines between threads → artificially high contention
+// Incorrect: Fields on the same cache line cause false sharing, which slows down execution.
 @State(Scope.Thread)
 public class FalseSharingBenchmark {
-    long counter1; // Both counters likely on the same 64-byte cache line
+    long counter1; // Both counters are likely on the same 64-byte cache line.
     long counter2;
 }
 
-// FIXED: Pad fields to separate cache lines
+// Correct: Pad fields to place them on separate cache lines.
 @State(Scope.Thread)
-@sun.misc.Contended  // JVM annotation — pads the object to avoid false sharing (JDK internal)
+@sun.misc.Contended  // A JVM annotation that pads the object to avoid false sharing.
 public class PaddedState {
     long counter = 0;
 }
 
-// Or: manual padding (portable)
+// Or use manual padding.
 @State(Scope.Thread)
 public class ManuallyPaddedState {
-    long p1, p2, p3, p4, p5, p6, p7; // 7 × 8 = 56 bytes padding
-    volatile long counter = 0;         // 8 bytes — now on its own cache line
-    long q1, q2, q3, q4, q5, q6, q7; // Trailing padding
+    long p1, p2, p3, p4, p5, p6, p7; // 56 bytes of padding.
+    volatile long counter = 0;         // The counter is now on its own cache line.
+    long q1, q2, q3, q4, q5, q6, q7; // Trailing padding.
 }
 ```
 
@@ -227,7 +226,7 @@ public class ManuallyPaddedState {
 @State(Scope.Benchmark)
 public class VirtualVsPlatformBenchmark {
 
-    @Param({"10", "100", "1000", "10000"}) // Parametrize concurrency level
+    @Param({"10", "100", "1000", "10000"}) // Concurrency levels.
     int concurrency;
 
     @Benchmark
@@ -249,7 +248,7 @@ public class VirtualVsPlatformBenchmark {
         for (int i = 0; i < n; i++) {
             executor.submit(() -> {
                 try {
-                    Thread.sleep(10); // Simulate I/O-bound work (10ms latency)
+                    Thread.sleep(10); // Simulate I/O work with a 10ms delay.
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 } finally {
@@ -262,75 +261,74 @@ public class VirtualVsPlatformBenchmark {
 }
 ```
 
-**Expected results (I/O-bound, 10ms sleep):**
+**Expected results for I/O-bound work:**
 
 ```
-concurrency=10:    Platform ~same as Virtual (both fit in pool)
-concurrency=100:   Platform ~same (pool of 100)
-concurrency=1000:  Platform degrades (context switching overhead, 1GB stack memory)
-concurrency=10000: Platform likely OOM or severe degradation; Virtual: linear throughput
+concurrency=10:    Platform threads perform similarly to virtual threads.
+concurrency=100:   Platform threads perform similarly.
+concurrency=1000:  Platform thread performance drops due to context switching and memory use.
+concurrency=10000: Platform threads may run out of memory, while virtual thread throughput scales linearly.
 ```
 
-**Expected results (CPU-bound, no sleep):**
+**Expected results for CPU-bound work:**
 
 ```
-All concurrency levels: Platform ≈ Virtual
-(Virtual threads don't yield on CPU work — no benefit over platform threads for CPU-bound tasks)
+All concurrency levels: Platform thread performance is similar to virtual thread performance.
+(Virtual threads do not yield during CPU-intensive work, so they provide no advantage here)
 ```
 
 ---
 
 ## 13.6 Little's Law — Theoretical Thread Pool Sizing
 
-**Little's Law** (from queuing theory):
+**Little's Law:**
 
 ```
 L = λ × W
 
 Where:
-  L = Average number of items in the system (concurrent requests)
-  λ = Average arrival rate (requests/second)
-  W = Average time each item spends in the system (latency in seconds)
+  L = Average number of active requests in the system
+  λ = Average arrival rate of requests per second
+  W = Average response time in seconds
 ```
 
 ### Applying Little's Law to Thread Pools
 
 ```
-Example: Your service must handle:
+Example:
   λ = 500 requests/second (throughput target)
-  W = 200ms average response time (latency, dominated by DB query)
+  W = 200ms average response time (dominated by database queries)
 
   L = λ × W = 500 req/s × 0.2s = 100 concurrent requests in flight
 
   Platform thread pool: Need at least 100 threads
-  Memory: 100 threads × 1MB stack = 100MB off-heap (reasonable)
+  Memory: 100 threads × 1MB stack = 100MB of off-heap memory
 
-New scenario: Service now calls 3 microservices, each 200ms:
-  W = 600ms (sequential calls)
+If the service calls three microservices sequentially, taking 200ms each:
+  W = 600ms
   L = 500 × 0.6 = 300 threads needed
   Memory: 300MB
 
-  With virtual threads + parallel calls:
-  W_parallel = 200ms (all 3 calls in parallel via StructuredTaskScope)
-  L = 500 × 0.2 = 100 virtual threads (same as before)
-  Memory: 100 × ~100KB heap = 10MB (10x less than platform thread pool)
+With virtual threads and parallel calls:
+  W_parallel = 200ms (all 3 calls in parallel)
+  L = 500 × 0.2 = 100 virtual threads
+  Memory: 100 × ~100KB heap = 10MB (much less than platform threads)
 ```
 
 **Little's Law for pool capacity planning:**
 
 ```java
 // Predict queue buildup:
-// If λ suddenly spikes to 1000 req/s but pool can only handle 500 concurrent:
-// L_arrived = 1000 × 0.2 = 200 needed, but pool = 100
-// → Excess 100 requests/second queue up → queue grows unbounded → latency grows
+// If request rate spikes but the pool cannot handle the load:
+// Requests queue up, causing latency to rise.
 
-// Break-even point: when to add capacity
-// At λ=N req/s, W=T seconds: need N×T threads in platform model
-// With virtual threads: L = N×T virtual threads (cheap), but DB connections still limited
+// Break-even point:
+// For a given arrival rate and latency, you need a matching number of platform threads.
+// Virtual threads are lightweight, but database connections remain a bottleneck.
 
 // Database connection sizing:
-// DB query time: 50ms → for 500 req/s: need 500 × 0.05 = 25 DB connections
-// This is why HikariCP default pool size 10 is often too small for high-throughput services
+// If database queries take 50ms, handling 500 requests per second requires 25 database connections.
+// The default pool size of 10 in many connection pools may be too small for high throughput.
 double requiredConnections = requestsPerSecond * avgDbTimeSeconds;
 ```
 
@@ -338,37 +336,35 @@ double requiredConnections = requestsPerSecond * avgDbTimeSeconds;
 
 ## 13.7 Measuring Coordinated Omission
 
-**Coordinated omission** is a subtle benchmarking flaw: when the system is slow, you measure FEWER samples (because slow responses reduce call rate). The result underestimates tail latency.
+**Coordinated omission** is a benchmarking flaw. When a system slows down, a test client that waits for each response before sending the next will send fewer requests. This reduces the number of measurements taken during slow periods, underestimating tail latency.
 
 ```java
-// WRONG: Coordinated omission — if response takes 500ms, we only call 2 times/sec
-// This hides the latency problem because slow periods have fewer measurements
+// Incorrect: The client waits for the response, which hides latency issues during slow periods.
 for (int i = 0; i < 1000; i++) {
     long start = System.nanoTime();
-    callService(); // If this takes 500ms, loop runs at 2 iterations/sec
+    callService(); // If this takes 500ms, the loop runs at 2 iterations per second.
     long latency = System.nanoTime() - start;
-    record(latency); // Only 2 samples/sec when service is slow!
+    record(latency); // Fewer samples are recorded during slow periods.
 }
 
-// CORRECT: Fixed-rate scheduling — measure latency from intended start time
+// Correct: Send requests at a fixed rate and measure latency from the intended start time.
 ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-long intervalNs = 1_000_000_000L / targetRatePerSecond; // e.g., 1ms for 1000 RPS
+long intervalNs = 1_000_000_000L / targetRatePerSecond; // 1ms for 1000 RPS
 AtomicLong nextStart = new AtomicLong(System.nanoTime());
 
 scheduler.scheduleAtFixedRate(() -> {
     long intendedStart = nextStart.getAndAdd(intervalNs);
     long actualStart = System.nanoTime();
-    long schedulingDelay = actualStart - intendedStart; // Track this separately!
+    long schedulingDelay = actualStart - intendedStart; // Track scheduling delay.
 
     callService();
     long serviceTime = System.nanoTime() - actualStart;
 
-    // Report BOTH: service time AND total response time (including scheduling delay)
-    record(serviceTime + schedulingDelay); // True end-to-end latency
+    // Report both the service time and the total response time.
+    record(serviceTime + schedulingDelay); // True end-to-end latency.
 }, 0, intervalNs, TimeUnit.NANOSECONDS);
 
-// Better: Use HdrHistogram (HDR = High Dynamic Range) for correct latency recording
-// HdrHistogram is specifically designed to handle coordinated omission:
+// Using HdrHistogram can help record latency percentiles accurately.
 // https://github.com/HdrHistogram/HdrHistogram
 ```
 
@@ -379,24 +375,24 @@ scheduler.scheduleAtFixedRate(() -> {
 ```java
 // Run JMH with built-in profilers:
 
-// GC pressure profiler (measures allocation rate and GC time):
+// The GC profiler measures allocation rate and garbage collection time:
 // java -jar benchmarks.jar -prof gc ".*MyBenchmark.*"
 // Output includes:
-//   gc.alloc.rate:   MB/sec allocated (high = GC pressure)
-//   gc.count:        GC events during benchmark
-//   gc.time:         Total GC pause time
+//   gc.alloc.rate:   Memory allocation rate in MB/sec
+//   gc.count:        Garbage collection events
+//   gc.time:         Total garbage collection pause time
 
-// Stack profiler (async-profiler integration):
+// The stack profiler integrates with async-profiler:
 // java -jar benchmarks.jar -prof async:output=flamegraph ".*MyBenchmark.*"
-// Generates flame graph showing where CPU time is spent
+// Generates a flame graph of CPU time.
 
-// Linux perf profiler (hardware PMU counters):
+// The Linux perf profiler accesses hardware counters:
 // java -jar benchmarks.jar -prof perfasm ".*MyBenchmark.*"
-// Shows assembly-level hotspots including cache misses and CAS retries
+// Shows assembly-level hotspots like cache misses and CAS retries.
 
-// JFR profiler:
+// The Java Flight Recorder (JFR) profiler:
 // java -jar benchmarks.jar -prof jfr ".*MyBenchmark.*"
-// Generates a .jfr file per benchmark run
+// Generates a JFR file for the benchmark run.
 ```
 
 ---
@@ -404,7 +400,7 @@ scheduler.scheduleAtFixedRate(() -> {
 ## 13.9 Benchmark: Lock Contention Crossover Point
 
 ```java
-// At what contention level does StampedLock optimistic read beat ReentrantReadWriteLock?
+// Compare StampedLock optimistic reads and ReentrantReadWriteLock under contention:
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.MICROSECONDS)
 @State(Scope.Benchmark)
@@ -421,7 +417,7 @@ public class LockCrossoverBenchmark {
     private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
 
     @Benchmark
-    @Threads(1) // JMH @Threads doesn't accept @Param — parametrize differently in practice
+    @Threads(1) // JMH @Threads does not accept parameters directly.
     public double stampedOptimisticRead() {
         long stamp = stampedLock.tryOptimisticRead();
         double cx = x, cy = y;
@@ -439,8 +435,8 @@ public class LockCrossoverBenchmark {
         finally { rwLock.readLock().unlock(); }
     }
 }
-// Expected: StampedLock wins at low write contention (< 5% writes)
-//           RRW comparable or better at moderate write contention (> 20% writes)
+// Expected: StampedLock performs better under low write contention.
+//           ReentrantReadWriteLock performs similarly or better under higher write contention.
 ```
 
 ---
@@ -449,30 +445,30 @@ public class LockCrossoverBenchmark {
 
 ```
 Before tuning:
-  [ ] Do you have a baseline measurement? (Cannot improve what you cannot measure)
-  [ ] Is the bottleneck actually concurrency? (Profile first — may be GC, DB, or network)
-  [ ] Are you measuring steady-state? (JIT warms up after ~10,000 invocations)
+  [ ] Establish a baseline measurement.
+  [ ] Identify the bottleneck. It may be garbage collection, database, or network latency rather than concurrency.
+  [ ] Measure steady-state performance after the JIT compiler warms up.
 
 Thread pool sizing:
-  [ ] Calculated L = λ × W for your traffic pattern?
-  [ ] Is the bottleneck CPU-bound or I/O-bound?
-      CPU-bound: pool_size ≈ CPU_cores (no more)
-      I/O-bound: pool_size = λ × W (scale with response time)
-  [ ] Using virtual threads for I/O-bound tasks?
-  [ ] Database connection pool sized via Little's Law? (connections = λ × db_time)
+  [ ] Calculate thread requirements using Little's Law.
+  [ ] Determine if the workload is CPU-bound or I/O-bound.
+      CPU-bound: Limit pool size to the number of CPU cores.
+      I/O-bound: Scale the pool size with response times.
+  [ ] Use virtual threads for I/O-bound tasks.
+  [ ] Size the database connection pool based on queries per second and database response times.
 
 Lock contention:
-  [ ] Lock critical sections are as short as possible?
-  [ ] No blocking I/O inside synchronized blocks?
-  [ ] ConcurrentHashMap instead of synchronized HashMap?
-  [ ] LongAdder instead of AtomicLong for high-write-rate counters?
-  [ ] StampedLock for read-heavy shared state?
+  [ ] Keep critical sections short.
+  [ ] Avoid blocking I/O inside synchronized blocks.
+  [ ] Use ConcurrentHashMap instead of synchronized maps.
+  [ ] Use LongAdder instead of AtomicLong for high-write-rate counters.
+  [ ] Use StampedLock for read-heavy shared state.
 
-Virtual thread specific:
-  [ ] No synchronized blocks in hot paths? (Causes carrier thread pinning)
-  [ ] ThreadLocal usage minimized? (Replace with ScopedValue)
-  [ ] Database connection pool properly throttled? (Semaphore + small pool)
-  [ ] HTTP client is virtual-thread friendly? (Use java.net.http.HttpClient)
+Virtual threads:
+  [ ] Avoid synchronized blocks in hot paths to prevent carrier thread pinning.
+  [ ] Minimize ThreadLocal usage and consider ScopedValue instead.
+  [ ] Throttle database connections using semaphores with a small pool.
+  [ ] Use virtual-thread friendly clients like java.net.http.HttpClient.
 ```
 
 ---
@@ -481,8 +477,8 @@ Virtual thread specific:
 
 **Q: What is coordinated omission and how does it affect latency measurements in concurrent systems?**
 
-> Coordinated omission is a systematic underreporting of tail latency in benchmarks and load tests. It occurs when the measurement tool only generates a new request after the previous one completes. When the system slows down (high latency), fewer requests are sent per second — meaning fewer samples are collected during the slow period. The result: the 99th percentile looks acceptable because you simply measured less during the slow periods. In a real production system, requests arrive at a fixed rate regardless of response time — so queue buildup during slowdowns causes latency spikes that the benchmark misses. Fix: use scheduled, fixed-rate request generation and record the latency from the intended start time (not actual start). Tools like `wrk2`, `vegeta`, and `HdrHistogram` handle this correctly.
+> Coordinated omission is a benchmarking flaw. When a system slows down, a test client that waits for each response before sending the next will send fewer requests. This reduces the number of measurements taken during slow periods, underestimating tail latency. In a real production system, requests arrive at a fixed rate regardless of response time. Queue buildup during slowdowns causes latency spikes that the benchmark misses. Fix: send requests at a fixed rate and measure latency from the intended start time. Tools like `wrk2`, `vegeta`, and `HdrHistogram` handle this correctly.
 
 **Q: You're told to "tune the thread pool for maximum throughput." How do you approach this scientifically?**
 
-> I follow three steps: (1) **Classify the workload**: Is it CPU-bound (computation), I/O-bound (DB, network), or mixed? CPU-bound optimal = CPU cores (more threads cause context switching overhead). I/O-bound optimal = λ × W (Little's Law). (2) **Measure the baseline**: Use JMH (for micro) or a load tool like wrk2 (for macro) at the current pool size. Record throughput, p50, p99, and p99.9 latency. (3) **Sweep pool sizes and measure**: Increment pool size by 25%, measure again, plot a throughput curve. It will peak and then decline (from context switching). The peak is the optimal. For virtual threads: size is not the tuning lever — tune the DB connection pool and Semaphore permits instead, because virtual threads themselves don't exhaust. Also measure GC impact — large pools under load increase heap pressure from per-request allocations, which shifts GC overhead.
+> I follow three steps: (1) **Classify the workload**: Determine if it is CPU-bound (computation), I/O-bound (database, network), or mixed. For CPU-bound workloads, limit the pool size to the number of CPU cores to avoid context switching overhead. For I/O-bound workloads, use Little's Law to calculate the pool size. (2) **Measure the baseline**: Use JMH or a load tool like `wrk2` to record throughput and latency percentiles at the current pool size. (3) **Sweep pool sizes and measure**: Increase the pool size incrementally, measure performance, and plot a throughput curve to find the peak. For virtual threads, size is not the primary tuning lever. Instead, tune the database connection pool and semaphore permits. Also measure garbage collection impact, as large workloads can increase heap pressure and garbage collection overhead.

@@ -1,39 +1,43 @@
 # Module 05: Context Propagation via Scoped Values
 
-In high-scale enterprise applications, web request details (such as the authenticated user, transaction ID, client IP address, locale, or tracing credentials) must often be shared across multiple layers of a system. Sharing this context implicitly across call stacks is a fundamental requirement in modern framework design.
+In large applications, request details like the authenticated user, transaction ID, client IP, or tracing data must often be shared across different layers. Sharing this context implicitly across call stacks is a common requirement in framework design.
 
-Historically, Java developers have relied on `ThreadLocal` variables for this purpose. However, with the finalization of **Virtual Threads** and **Structured Concurrency**, `ThreadLocal` introduces significant memory and operational bottlenecks. 
+Historically, Java developers used `ThreadLocal` variables for this. However, with **Virtual Threads** and **Structured Concurrency**, `ThreadLocal` causes memory and operational issues.
 
-In this module, we will explore **Scoped Values** (`java.lang.ScopedValue`), finalized in JDK 25. We will analyze the core architectural limitations of parameter passing and `ThreadLocal` context, study the Scoped Value API under the hood, examine production integration patterns, and implement three comprehensive code labs.
+In this module, we will explore **Scoped Values** (`java.lang.ScopedValue`), finalized in JDK 25. We will look at the limitations of parameter passing and `ThreadLocal`, study how Scoped Values work under the hood, examine integration patterns, and complete three hands-on labs.
 
 ---
 
 ## 1. The Context Propagation Challenge
 
 ### The Problem: Passing Context through APIs
-In layered architectures (e.g., Controller-Service-Repository), data must often travel from the entry point (e.g., an HTTP request interceptor) to the leaf nodes (e.g., database audit loggers). There are two primary ways to achieve this:
+In layered architectures (such as Controller-Service-Repository), data often needs to travel from the entry point (like an HTTP interceptor) to downstream layers (like database loggers). There are two ways to do this:
 
 1. **Explicit Parameter Passing**: Every method in the call stack accepts context parameters.
-2. **Implicit Context Passing**: Context is bound to the execution thread, allowing downstream layers to retrieve it on-demand.
+2. **Implicit Context Passing**: Context is bound to the execution thread, letting downstream layers retrieve it when needed.
 
-If we use explicit parameter passing, we encounter three critical architectural issues:
+Using explicit parameter passing causes three main issues:
 
 ```
 [HTTP Request] ──► Controller.handle(ReqContext) ──► Service.process(ReqContext) ──► Repository.save(ReqContext)
 ```
 
 #### 1. Parameter Pollution
-Every method signature in the call chain is forced to declare context parameters (like `requestId`, `userPrincipal`, or `clientLocale`) even if the intermediate method logic has absolutely no interest in that data. This pollutes clean domain models with infrastructure-level parameters.
+Every method signature in the call chain must declare context parameters (like `requestId`, `userPrincipal`, or `clientLocale`) even if the method does not use that data. This pollutes domain models with infrastructure parameters.
 
 #### 2. Interface Brittleness
-If the infrastructure requirements evolve (for example, adding a distributed tracing span ID or security credentials), the context object must change. This modification ripples through the codebase, forcing updates to interface definitions, method calls, and testing mocks across dozens or hundreds of classes.
+If infrastructure requirements change (for example, adding a tracing ID or security credentials), the context object must change. This forces updates to interface definitions, method calls, and tests across many classes.
 
 #### 3. Coupling and Testability
-Forcing context parameters into core business interfaces tightly couples the application domain layer to specific framework metadata. Unit testing becomes verbose and brittle, as you must instantiate mock context payloads for every test execution, even for basic calculations that ignore the context## 2. ThreadLocal: The Classical Solution & Its Limitations
+Forcing context parameters into business interfaces couples the domain layer to framework metadata. Unit testing becomes verbose because you must create mock context objects for every test, even when the method under test ignores the context.
 
-To decouple business method signatures from infrastructure context, Java 1.2 introduced `ThreadLocal<T>`. 
+---
 
-A `ThreadLocal` variable creates a thread-isolated storage area. When a thread calls `threadLocal.set(value)`, the value is placed in a thread-specific map (`ThreadLocalMap`) owned by the executing `Thread` instance. Any downstream method executing on the same thread can call `threadLocal.get()` to retrieve it.
+## 2. ThreadLocal: The Classical Solution & Its Limitations
+
+To decouple business method signatures from infrastructure context, Java 1.2 introduced `ThreadLocal<T>`.
+
+A `ThreadLocal` variable creates a thread-isolated storage area. When a thread calls `threadLocal.set(value)`, the value is placed in a thread-specific map (`ThreadLocalMap`) owned by the `Thread` instance. Any downstream method running on the same thread can call `threadLocal.get()` to retrieve it.
 
 ```
 +-------------------------------------------------------------------------+
@@ -74,9 +78,9 @@ public class SecurityContextHolder {
 }
 ```
 
-### Under the Hood: ThreadLocalMap and the WeakReference Leak
+### Under the Hood: ThreadLocal Map and Weak Reference Leaks
 
-To understand the core problem of `ThreadLocal`, we must examine the source code of `java.lang.Thread` and `java.lang.ThreadLocal`. 
+To understand the core problem of `ThreadLocal`, we must examine the source code of `java.lang.Thread` and `java.lang.ThreadLocal`.
 Inside the `Thread` class, thread-local storage is declared as:
 ```java
 /* ThreadLocal values pertaining to this thread. This map is maintained by the ThreadLocal class. */
@@ -99,31 +103,31 @@ This design introduces a critical memory leak vulnerability:
 
 1. **Garbage Collection of Keys**:
    - The key inside the `Entry` inherits from `WeakReference<ThreadLocal<?>>`.
-   - When the developer-facing `ThreadLocal` reference goes out of scope and has no more strong references (for example, when a web application is undeployed or a context classloader is discarded), the garbage collector is free to reclaim the `ThreadLocal` instance.
-   - Upon garbage collection, the key of the `Entry` becomes `null`, leaving a "stale entry" inside the `ThreadLocalMap`.
+   - When the `ThreadLocal` reference goes out of scope and has no more strong references (for example, when a web application is undeployed), the garbage collector can reclaim the `ThreadLocal` instance.
+   - After garbage collection, the key of the `Entry` becomes `null`, leaving a stale entry in the `ThreadLocalMap`.
 
 2. **Strong Reference Retention of Values**:
-   - Although the key is garbage collected and becomes `null`, the `Entry` itself (which is an element of the `Entry[] table` array inside `ThreadLocalMap`) remains strongly referenced.
-   - More importantly, the `Entry.value` field retains a **strong reference** to the user-supplied value object (such as a database connection, user profile details, or massive classloader hierarchies).
-   - Because the thread object itself maintains a strong reference to the `ThreadLocalMap` via its instance field `threadLocals`, the GC root chain remains active:
+   - Although the key is garbage collected and becomes `null`, the `Entry` itself (which is in the `Entry[] table` array inside `ThreadLocalMap`) remains strongly referenced.
+   - The `Entry.value` field retains a **strong reference** to the value object (such as a database connection or user details).
+   - Because the thread object maintains a strong reference to the `ThreadLocalMap` via `threadLocals`, the GC root chain remains active:
      $$\text{GC Root} \longrightarrow \text{Thread Instance} \longrightarrow \text{ThreadLocalMap} \longrightarrow \text{Entry[] Table} \longrightarrow \text{Entry} \longrightarrow \text{Value Object}$$
-   - The garbage collector cannot reclaim the value object because a valid strong reference path exists from an active thread.
+   - The garbage collector cannot reclaim the value object because a strong reference path exists from an active thread.
 
-3. **Leak in Pooled Threads (Tomcat, Jetty)**:
-   - In standard servlet engines, worker threads are pooled and run for the entire lifetime of the JVM.
-   - If the developer forgets to explicitly call `CURRENT_USER.remove()` inside a `finally` block, the strong reference path remains active forever.
-   - Stale entries are only cleaned up as side effects during other map modifications (e.g., resizing the map or inserting new entries). Under steady state, these entries may never be cleaned, leading to slow heap memory starvation.
+3. **Leaks in Pooled Threads**:
+   - In web servers, worker threads are pooled and run for the lifetime of the application.
+   - If you forget to call `CURRENT_USER.remove()` in a `finally` block, the strong reference remains active.
+   - Stale entries are only cleaned up during other map modifications (like resizing or inserting new entries). Under a steady state, these entries might never be cleaned, leading to memory leaks.
 
 ##### Deep Dive: ThreadLocal Garbage Collection Reference Tracing and Memory Profiling
 
-To understand why a `ThreadLocal` leak persists despite keys being marked as `WeakReference`, you must analyze how garbage collection algorithms (such as G1 GC or ZGC) trace references during their execution cycles.
+To understand why a `ThreadLocal` leak persists despite keys being marked as `WeakReference`, we must analyze how garbage collection algorithms (such as G1 GC or ZGC) trace references.
 
 ###### 1. Reference Strengths in the JVM
-The JVM supports four distinct strengths of object references, each defining a different garbage collection lifespan:
-- **Strong References**: Standard variable assignments (e.g., `Object obj = new Object()`). The GC will never reclaim a strongly referenced object.
-- **Soft References**: Encapsulated via `SoftReference`. The GC reclaims these objects *only* if the JVM is in danger of running out of memory (heap exhaustion).
-- **Weak References**: Encapsulated via `WeakReference`. The GC reclaims these objects during the next marking phase if they have no strong reference paths, regardless of memory availability.
-- **Phantom References**: Encapsulated via `PhantomReference`. Used for post-mortem cleanup cues.
+The JVM supports four strengths of object references:
+- **Strong References**: Standard assignments (e.g., `Object obj = new Object()`). The GC never reclaims a strongly referenced object.
+- **Soft References**: Encapsulated via `SoftReference`. The GC reclaims these objects *only* if the JVM is low on memory.
+- **Weak References**: Encapsulated via `WeakReference`. The GC reclaims these objects during the next marking phase if they have no strong reference paths.
+- **Phantom References**: Encapsulated via `PhantomReference`. Used for post-mortem cleanup.
 
 ###### 2. How the GC Processes Weak References (The Marking Phase)
 During a garbage collection cycle, the collector executes a multi-phase marking process:
@@ -144,16 +148,16 @@ During a garbage collection cycle, the collector executes a multi-phase marking 
 [Enqueue cleared references in ReferenceQueue]
 ```
 
-1. **Root Scanning**: The GC pauses application threads (Stop-the-World phase) and identifies all active GC Roots (thread stack variables, JNI references, system classloaders).
+1. **Root Scanning**: The GC pauses threads and identifies all active GC Roots (thread stack variables, JNI references, system classloaders).
 2. **Strong Path Tracing**: The collector traverses all strong reference paths. Any object reachable from a root is marked as alive.
 3. **Weak Reference Processing**:
    - The collector locates all active `WeakReference` objects.
    - It checks whether the *referent* (the object pointed to by the weak reference, which is the `ThreadLocal` key in our map) is reachable via any strong paths.
-   - If the key is *not* reachable via a strong reference path (e.g., the class holding the `ThreadLocal` has been unloaded), the GC sets the referent pointer inside the `WeakReference` wrapper to `null`.
-   - **Crucial Limitation**: The GC *only* sets the key reference pointer to `null`. The GC has no built-in instruction to nullify the **value** field (`Entry.value`) because the value field is a standard, strong reference inside the `Entry` object. The `Entry` is still strongly reachable via the thread's `threadLocals` map array.
+   - If the key is *not* reachable via a strong reference path, the GC sets the referent pointer inside the `WeakReference` wrapper to `null`.
+   - **Crucial Limitation**: The GC *only* sets the key reference pointer to `null`. The GC does not nullify the **value** field (`Entry.value`) because the value field is a standard, strong reference inside the `Entry` object. The `Entry` is still reachable via the thread's `threadLocals` map array.
 
 ###### 3. Tracing a ThreadLocal Leak in Eclipse Memory Analyzer (MAT)
-When debugging a suspected thread-local memory leak in production, engineers generate a heap dump (`jmap -dump:format=b,file=heap.hprof <PID>`) and load it into a profiler.
+When debugging a thread-local memory leak, engineers generate a heap dump (`jmap -dump:format=b,file=heap.hprof <PID>`) and load it into a profiler.
 
 Tracing the path to GC roots for a leaked object reveals the following object graph:
 
@@ -169,37 +173,37 @@ java.lang.Thread  [GC Root: Active Worker Thread]              │ 2,408 bytes
 ```
 
 ###### Key Indicators of a Leak:
-- **`referent = null`**: This confirms that the `ThreadLocal` instance itself has been garbage collected. The slot index is now stale.
+- **`referent = null`**: This confirms that the `ThreadLocal` instance has been garbage collected. The slot index is now stale.
 - **`value`**: Points to a large domain object. Since the thread remains active, this object is pinned in memory, causing a leak.
 
 ###### 4. How Scoped Values Avoid the Reference Chain
-`ScopedValue` avoids this complex graph entirely by shifting the dynamic context from a heap-allocated hash map inside the thread to stack-based snapshots:
-- When a scoped value task executes, the dynamic binding is associated with the local execution frame of the active method stack.
+`ScopedValue` avoids this graph entirely by shifting context from a heap-allocated hash map inside the thread to stack-based snapshots:
+- When a scoped value task runs, the binding is associated with the local execution frame of the active method stack.
 - When the method returns (or throws an exception), the execution frame is popped. The pointer link is updated to the parent's frame, and the binding node becomes unreachable.
-- Because there is no persistent hash map or table array inside the thread object, there are no weak-reference wrappers, no stale null-key entries, and no strong reference value traps.
+- Because there is no hash map or table array inside the thread object, there are no weak-reference wrappers, no stale null-key entries, and no strong reference value traps.
 
 ### Detailed Walkthrough of SecurityContextHolder
 
 1. **Binding Phase (`CURRENT_USER.set(username)`)**:
-   - When `handleRequest()` is called, line 61 executes `CURRENT_USER.set(username)`.
-   - The JVM checks if the executing `Thread` already has a `ThreadLocalMap` initialized. If it does not, it instantiates a new map with a default size of 16 entries and maps the current `ThreadLocal` instance reference to the string `username`.
-   - If the map exists, the key's hashcode determines the index in the entry table. If there is a collision, open addressing (linear probing) is used to find the next empty slot.
+   - When `handleRequest()` is called, the thread executes `CURRENT_USER.set(username)`.
+   - The JVM checks if the executing `Thread` has a `ThreadLocalMap` initialized. If not, it creates a new map with a default size of 16 entries and maps the `ThreadLocal` instance reference to the string `username`.
+   - If the map exists, the key's hashcode determines the index in the entry table. If there is a collision, linear probing is used to find the next empty slot.
 
 2. **Downstream Invocation (`requestTask.run()`)**:
-   - The executing thread enters the `try` block and calls `run()`. Any code running in this thread can now call `SecurityContextHolder.getCurrentUser()` to retrieve `"username"`.
-   - The retrieval walks the thread's local map and extracts the value strongly referenced by the `ThreadLocal` key.
+   - The thread enters the `try` block and calls `run()`. Any code running in this thread can now call `SecurityContextHolder.getCurrentUser()` to retrieve the username.
+   - The retrieval walks the thread's local map and extracts the value referenced by the `ThreadLocal` key.
 
 3. **Strict Cleanup Guarantee (`finally` block)**:
-   - At line 67, the `finally` block executes `CURRENT_USER.remove()`.
-   - The JVM locates the map entry corresponding to `CURRENT_USER` and removes the entire `Entry` reference from the table, clearing the strong reference to the value object and allowing it to be garbage collected immediately.
-   - If this step is omitted, the reference persists, causing a memory leak when the thread is recycled back into the application pool.
+   - In the `finally` block, the thread executes `CURRENT_USER.remove()`.
+   - The JVM locates the map entry corresponding to `CURRENT_USER` and removes the `Entry` reference from the table, clearing the strong reference to the value object and letting it be garbage collected immediately.
+   - If this step is omitted, the reference persists, causing a memory leak when the thread is recycled back into the pool.
 
 ### Inherent Flaws of ThreadLocal
 
-While `ThreadLocal` successfully resolves the parameter passing problem, it introduces severe operational issues:
+While `ThreadLocal` resolves the parameter passing problem, it introduces operational issues:
 
 #### 1. Unconstrained Mutability
-Any downstream code with access to the `ThreadLocal` variable can call `set(newValue)` or `remove()`. This means a helper utility or repository call could accidentally mutate or clear the context, breaking upstream invariants. Tracking where and when a thread-local value was mutated is notoriously difficult.
+Any downstream code with access to the `ThreadLocal` variable can call `set(newValue)` or `remove()`. This means a helper utility or repository call could accidentally change or clear the context, breaking upstream assumptions. Tracking where and when a thread-local value was mutated is difficult.
 
 ```java
 // Downstream code can silently corrupt parent context:
@@ -207,20 +211,20 @@ SecurityContextHolder.CURRENT_USER.set("malicious_user");
 ```
 
 #### 2. Unbounded Lifetime
-A thread-local value remains bound to the thread until it is explicitly cleared via `remove()`. In web servers that utilize thread pooling (like standard Tomcat pools), threads are reused across multiple requests. If a developer forgets to invoke `remove()` in a `finally` block:
+A thread-local value remains bound to the thread until it is explicitly cleared via `remove()`. In web servers using thread pooling, threads are reused across multiple requests. If you forget to invoke `remove()` in a `finally` block:
 * **Memory Leaks**: The object referenced by the thread-local stays pinned in memory, preventing GC.
-* **Security Leaks**: A subsequent request processed by the same thread will inherit the stale credentials of the prior user, potentially leaking administrative privileges to regular users.
+* **Security Leaks**: A subsequent request processed by the same thread will inherit the credentials of the prior user, potentially leaking access.
 
 #### 3. Heavyweight Inheritance (InheritableThreadLocal)
-When a task spawns child threads, context must often be propagated. Java provides `InheritableThreadLocal` for this purpose. When a child thread is created, the JVM copies the parent thread's `ThreadLocalMap`. 
-* This requires deep copying of the map entries, creating significant allocation overhead.
-* If a parent thread spawns 1,000 child threads, the data is referenced 1,000 times, multiplying memory consumption.
+When a task spawns child threads, context must often be propagated. Java provides `InheritableThreadLocal` for this purpose. When a child thread is created, the JVM copies the parent thread's `ThreadLocalMap`.
+* This requires deep copying of the map entries, creating allocation overhead.
+* If a parent thread spawns 1,000 child threads, the data is referenced 1,000 times, multiplying memory use.
 
 ### The Virtual Thread Breakdown
 
-The memory overhead of `ThreadLocalMap` becomes a critical bottleneck when transitioning to virtual threads:
+The memory overhead of `ThreadLocalMap` becomes a bottleneck when transitioning to virtual threads:
 
-* **Platform Thread Model**: A server handles 200 concurrent requests using a pool of 200 platform threads. 200 maps inside the threads are easily managed by the OS.
+* **Platform Thread Model**: A server handles 200 concurrent requests using a pool of 200 platform threads. 200 maps inside the threads are easily managed.
 * **Virtual Thread Model**: A server handles 1,000,000 concurrent requests using 1,000,000 virtual threads. If each virtual thread allocates even a small `ThreadLocalMap` containing standard metadata, the heap footprint explodes instantly:
 
 $$\text{Memory Overhead} = 1,000,000 \text{ threads} \times \text{map overhead} \approx \text{Gigabytes of redundant heap allocations}$$
@@ -240,29 +244,29 @@ A Scoped Value is a container that allows a value to be safely and implicitly pa
                                   │
                        [Dynamic Scope Starts]
                                   │
-            ┌─────────────────────┼─────────────────────┐
-            ▼                     ▼                     ▼
-     [Service.get()]       [Repo.get()]         [Forked VThread] (Inherits link)
-            │                     │                     │
-            └─────────────────────┼─────────────────────┘
+             ┌─────────────────────┼─────────────────────┐
+             ▼                     ▼                     ▼
+      [Service.get()]       [Repo.get()]         [Forked VThread] (Inherits link)
+             │                     │                     │
+             └─────────────────────┼─────────────────────┘
                                   │
-                         [Dynamic Scope Ends]
+                          [Dynamic Scope Ends]
                                   │
                        [Value Automatically Cleared]
 ```
 
 ### Core Architecture and Properties
 
-1. **Strict Immutability**: Once a scoped value is bound to a specific execution scope, it cannot be modified. Downstream methods can only read the value. This guarantees thread-safety and predictability.
-2. **Dynamic Bounded Lifetime**: The binding is lexically bounded by the execution of a `run()` or `call()` method block. The moment the block finishes, the binding is automatically destroyed by the JVM. No manual `.remove()` call is ever required.
-3. **Link-Based Inheritance**: When spawning concurrent subtasks via `StructuredTaskScope.fork()`, child threads inherit access to the parent's scoped values. Instead of copying map entries, the JVM establishes a lightweight pointer link back to the parent scope's stack frame. This represents **zero allocation cost** at fork time.
-4. **NoSuchElementException on Unbound Read**: Unlike `ThreadLocal` (which returns `null` when a variable is not set), `ScopedValue.get()` throws a `NoSuchElementException` if invoked outside a bound scope. This helps capture configuration errors during integration testing.
+1. **Strict Immutability**: Once a scoped value is bound to an execution scope, it cannot be modified. Downstream methods can only read the value. This guarantees thread-safety.
+2. **Bounded Lifetime**: The binding is bounded by the execution of a `run()` or `call()` block. The moment the block finishes, the binding is automatically destroyed by the JVM. No manual `remove()` call is needed.
+3. **Link-Based Inheritance**: When spawning concurrent subtasks via `StructuredTaskScope.fork()`, child threads inherit access to the parent's scoped values. Instead of copying map entries, the JVM establishes a pointer link back to the parent scope's stack frame. This has **zero allocation cost** at fork time.
+4. **NoSuchElementException on Unbound Read**: Unlike `ThreadLocal` (which returns `null` when a variable is not set), `ScopedValue.get()` throws a `NoSuchElementException` if called outside a bound scope. This helps catch configuration errors during testing.
 
 ---
 
 ## 4. Core ScopedValue API
 
-A `ScopedValue` is declared as a `private static final` field. Its constructors are private; instances are created using the `newInstance()` factory method.
+A `ScopedValue` is typically declared as a `private static final` field. Its constructors are private; instances are created using the `newInstance()` factory method.
 
 ```java
 private static final ScopedValue<User> CURRENT_USER = ScopedValue.newInstance();
@@ -282,7 +286,7 @@ private static final ScopedValue<User> CURRENT_USER = ScopedValue.newInstance();
 | `scopedValue.orElseThrow(Supplier<X>)`| `T` | Returns the value, or throws a custom exception if unbound. |
 
 ### Chaining Multiple Bindings
-You can bind multiple scoped values simultaneously by chaining `where()` calls on the carrier:
+You can bind multiple scoped values at once by chaining `where()` calls:
 
 ```java
 ScopedValue.where(CURRENT_USER, user)
@@ -295,7 +299,7 @@ ScopedValue.where(CURRENT_USER, user)
 
 ## 5. Under the Hood: Stack-Based Dynamic Bindings
 
-Scoped Values are implemented using a lightweight, stack-based lookup mechanism:
+Scoped Values use a stack-based lookup mechanism:
 
 ```
 [Stack Frame: Main Thread]
@@ -304,80 +308,80 @@ Scoped Values are implemented using a lightweight, stack-based lookup mechanism:
               └─► get() searches parent stack frames in O(1) time
 ```
 
-When a thread enters a `ScopedValue.where(KEY, value).run(...)` block, the JVM registers the binding inside a per-thread snapshot pointer. 
+When a thread enters a `ScopedValue.where(KEY, value).run(...)` block, the JVM registers the binding in a per-thread snapshot pointer.
 
 ### Deep JVM Internal Execution Model
 
-Under the hood, the bindings are managed through a chain of snapshot objects on the execution stack rather than a map inside the thread object. 
+Bindings are managed through a chain of snapshot objects on the execution stack, rather than a map inside the thread object.
 
 1. **The Binding Chain**:
-   Every thread contains a hidden field (managed by the JVM) called `scopedValueBindings` which points to a node in a linked list of bindings:
+   Every thread contains a hidden field (managed by the JVM) called `scopedValueBindings` that points to a node in a linked list of bindings:
    ```java
    // Conceptual representation of the JVM internal state
    class Thread {
-       Object scopedValueBindings; // Pointers to the current binding stack node
+       Object scopedValueBindings; // Points to the current binding stack node
    }
    ```
 2. **Snapshot Creation on Bind**:
-   When `ScopedValue.where(key, value).run(task)` is executed:
-   - The JVM allocates a lightweight snapshot node that contains the `key`, the `value`, and a pointer reference to the previous head of the `scopedValueBindings` chain.
+   When `ScopedValue.where(key, value).run(task)` runs:
+   - The JVM allocates a lightweight snapshot node containing the `key`, `value`, and a reference to the previous head of the `scopedValueBindings` chain.
    - The thread's `scopedValueBindings` field is updated to point to this new snapshot node.
 3. **Implicit Cleanup on Return**:
-   - The `run` or `call` block executes downstream.
-   - When the block completes (normally or exceptionally), the thread's `scopedValueBindings` is restored to point to the previous head pointer. The newly created snapshot node is immediately eligible for garbage collection since it is no longer referenced by the thread. This is a zero-cleanup design that executes in $O(1)$ time.
+   - The `run` or `call` block executes.
+   - When the block completes, the thread's `scopedValueBindings` is restored to point to the previous head pointer. The new snapshot node is immediately eligible for garbage collection. This cleanup runs in $O(1)$ time.
 4. **O(1) Dynamic Lookup Performance**:
    - When a downstream layer calls `key.get()`, the JVM walks the `scopedValueBindings` chain starting from the current head.
-   - Because execution nesting levels in Java applications are usually shallow (typically less than 10-15 frames deep), the lookup completes in $O(1)$ time.
-   - The JVM optimizes this further using a thread-local lookup cache. If a scoped value is read repeatedly, the lookup is served directly from a hardware register or a fast cache slot, matching the performance of a direct method argument access.
+   - Because method nesting in Java is usually shallow (typically less than 10-15 frames deep), the lookup completes in $O(1)$ time.
+   - The JVM optimizes this using a thread-local lookup cache. If a scoped value is read repeatedly, the lookup is served directly from a CPU register or a cache slot, making it as fast as a direct method argument.
 
 ### Java Memory Model (JMM) happens-before Guarantees
 
-Scoped Values guarantee clear visibility boundary edges based on JMM happens-before relationships:
-1. **Binding Edge**: The binding of a value to a `ScopedValue` happens-before any read invocation of `get()` within the bound task's scope.
-2. **Scope Termination Edge**: The completion of the bound task happens-before the restoring of the parent scope's previous bindings.
-3. **Virtual Thread Inheritance Edge**: The action of binding a scoped value in the parent thread happens-before the execution of any subtask spawned via `StructuredTaskScope.fork()`. The spawned subtask virtual thread has immediate, read-only, conflict-free visibility of all scoped values bound by the parent thread prior to the fork.
+Scoped Values guarantee clear visibility based on JMM happens-before relationships:
+1. **Binding Edge**: Binding a value to a `ScopedValue` happens-before any read invocation of `get()` within the bound scope.
+2. **Scope Termination Edge**: The completion of the bound task happens-before restoring the parent scope's previous bindings.
+3. **Virtual Thread Inheritance Edge**: Binding a scoped value in the parent thread happens-before the execution of any subtask spawned via `StructuredTaskScope.fork()`. The spawned subtask virtual thread has immediate, read-only visibility of all scoped values bound by the parent thread before the fork.
 
 ##### Architectural Comparison: Dynamic Scoping Across Modern Runtimes
 
-To appreciate the design of Scoped Values, it is instructive to compare Java's stack-bounded, link-inherited context propagation model with the dynamic scoping and implicit context mechanisms employed in other programming languages and runtimes.
+To appreciate Scoped Values, it is helpful to compare Java's stack-bounded context propagation with the mechanisms used in other programming languages.
 
 | Language / Runtime | Mechanism Name | Lifecycle Scope | Context Inheritance Model | Runtime Overhead |
 | :--- | :--- | :--- | :--- | :--- |
 | **Clojure (JVM)** | Dynamic Vars (`^:dynamic`) | Thread-bound dynamic binding (`binding` blocks) | Captured via agent bindings or future bindings | High (Ref-based lookup and thread-local maps) |
 | **Python (asyncio)** | Context Variables (`contextvars`) | Task-bound context frame | Copy-on-Write (CoW) mapping when spawning subtasks | Medium (Dictionary lookups and frame cloning) |
-| **Scala** | Implicit/Given Parameters | Compile-time lexical scoping | Explicit signatures synthesized by the compiler | Zero runtime overhead (signature-pollution remains) |
+| **Scala** | Implicit/Given Parameters | Compile-time lexical scoping | Explicit signatures synthesized by the compiler | Zero runtime overhead (signature pollution remains) |
 | **Java (Project Loom)** | Scoped Values (`ScopedValue`) | Stack-bounded dynamic scope (`run`/`call` blocks) | Link-based parent-pointer traversal | Near-zero (Register-based caching, $O(1)$ stack walk) |
 
 ###### 1. Clojure's Dynamic Vars
 Clojure has long supported dynamic variables (declared with `^:dynamic` metadata).
-- **Binding Mechanics**: The `binding` macro sets a thread-local binding for a dynamic var. Under the hood, Clojure utilizes its own thread-local map structure (`Var$Frame`) to push and pop values.
-- **Inheritance**: When spawning a future or thread, Clojure captures the current dynamic bindings snapshot and merges it into the child thread's local map.
-- **Loom Differences**: Because Clojure's frame maps are mutable and copy-heavy, they incur higher memory allocation overhead than Java's Scoped Values. Scoped Values enforce strict immutability, allowing child threads to share the parent's bindings via pointer link chains rather than duplicating maps.
+- **Binding Mechanics**: The `binding` macro sets a thread-local binding for a dynamic var. Clojure uses its own thread-local map structure (`Var$Frame`) to push and pop values.
+- **Inheritance**: When spawning a future or thread, Clojure captures the current dynamic bindings and merges them into the child thread's local map.
+- **Loom Differences**: Because Clojure's frame maps are mutable and copy-heavy, they incur higher memory allocation overhead. Scoped Values enforce strict immutability, letting child threads share the parent's bindings via pointer link chains rather than duplicating maps.
 
 ###### 2. Python's ContextVars
-Python introduced the `contextvars` module to support concurrent context propagation inside asynchronous event loops (`asyncio`).
-- **Binding Mechanics**: Context variables are stored in a thread-safe `Context` object. Every asyncio Task manages its own local context frame mapping keys to values.
-- **Inheritance**: Spawning a child task or callback clone clones the parent's `Context` using a Copy-on-Write (CoW) dictionary. If a child task modifies a variable, a new dictionary entry is allocated, isolating the child's changes from the parent.
-- **Loom Differences**: While Python's CoW model supports mutability (rebinding child values without mutating the parent), it requires copying dictionary descriptors on task creation. Java's Scoped Values are fully read-only, allowing child virtual threads to share a single parent pointer chain without map allocations.
+Python introduced the `contextvars` module to support concurrent context propagation in asynchronous event loops (`asyncio`).
+- **Binding Mechanics**: Context variables are stored in a thread-safe `Context` object. Every asyncio Task manages its own local context frame.
+- **Inheritance**: Spawning a child task clones the parent's `Context` using a Copy-on-Write (CoW) dictionary. If a child task modifies a variable, a new dictionary entry is allocated, isolating the child's changes from the parent.
+- **Loom Differences**: While Python's CoW model supports mutability, it requires copying dictionary descriptors on task creation. Java's Scoped Values are fully read-only, letting child virtual threads share a parent pointer chain without map allocations.
 
 ###### 3. Scala's Implicit/Given Parameters
-Scala uses compile-time resolution to pass context parameters implicitly.
+Scala uses compile-time resolution to pass context parameters.
 - **Binding Mechanics**: The programmer defines a context value as `given` (Scala 3) or `implicit` (Scala 2). Downstream methods that declare `using` or `implicit` parameters resolve this value at compile time.
-- **Inheritance**: The compiler automatically rewrites method signatures, injecting the context value as an additional parameter. At the JVM bytecode level, this is compiled as standard explicit parameter passing.
-- **Loom Differences**: Scala's implicits have zero runtime overhead, but they suffer from **interface pollution**. Every method in the call stack must be updated to accept the context parameter (even if implicit). Java's Scoped Values resolve this dynamically: intermediate method signatures are completely decoupled from context definition metadata, preserving clean APIs.
+- **Inheritance**: The compiler rewrites method signatures, injecting the context value as an additional parameter. At the JVM bytecode level, this is compiled as standard parameter passing.
+- **Loom Differences**: Scala's implicits have zero runtime overhead, but they cause **interface pollution** because every method in the call stack must be updated to accept the parameter. Java's Scoped Values resolve this dynamically: intermediate method signatures are completely decoupled from context definition metadata, preserving clean APIs.
 
 ###### 4. Java Scoped Values: The Synthesis
 Loom's Scoped Values combine the API cleanliness of Clojure's dynamic variables with the performance efficiency of Scala's parameter passing.
-By organizing bindings as an immutable linked list on the execution stack and caching lookups in CPU registers, the JVM offers a zero-allocation inheritance path that scales seamlessly to millions of concurrent virtual threads, bridging the gap between clean framework architecture and raw execution speed.
+By organizing bindings as an immutable linked list on the execution stack and caching lookups in CPU registers, the JVM offers a zero-allocation inheritance path that scales to millions of concurrent virtual threads, combining clean framework architecture with raw execution speed.
 
 ---
 
 ## 6. Case Studies from the Field
 
-To fully appreciate the flexibility of Scoped Values, we will review three complete, compile-ready classes demonstrating real-world framework design patterns.
+We will review three complete, compile-ready classes showing real-world design patterns.
 
 ### 1. TemplateProcessor: Recursion Protection
-In template parsing systems, recursive template includes can lead to stack overflow crashes if a template references itself. We can use a rebounded `ScopedValue<Integer>` to track recursion depth and block processing if the depth exceeds a safety limit.
+In template engines, recursive templates can cause stack overflow errors if a template references itself. We can use a `ScopedValue<Integer>` to track recursion depth and stop processing if the depth exceeds a limit.
 
 ```java
 import java.util.NoSuchElementException;
@@ -440,27 +444,26 @@ public class TemplateProcessor {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `TemplateProcessor`
+##### Code Walkthrough: `TemplateProcessor`
 
 1. **Lazy Initialization of Dynamic Bindings**:
-   - At line 272, the entry point `processTemplate()` executes `RECURSION_DEPTH.isBound()`.
-   - If the method is called as a root template render, no binding is active. The method initializes the chain using `ScopedValue.where(RECURSION_DEPTH, 0).call(...)`.
-   - If a nested call occurs (such as an internal recursion step), the binding already exists, and we proceed directly to `processTemplateInternal()` to avoid resetting the depth count.
+   - In the entry point `processTemplate()`, the code checks `RECURSION_DEPTH.isBound()`.
+   - If unbound, it initializes the chain using `ScopedValue.where(RECURSION_DEPTH, 0).call(...)`.
+   - If a nested call is already running, the binding exists, and the code calls `processTemplateInternal()` directly to avoid resetting the depth.
 
 2. **Stack Nesting Guard**:
-   - Inside `processTemplateInternal()`, line 281 reads the current nesting depth via `RECURSION_DEPTH.get()`.
-   - If `currentDepth` is greater than or equal to `MAX_NESTING_LEVEL` (5), it throws a `TemplateException`. This acts as an early stack safeguard, preventing infinite recursion from triggering a native JVM `StackOverflowError`.
+   - Inside `processTemplateInternal()`, the code reads the current depth using `RECURSION_DEPTH.get()`.
+   - If the depth is at or above `MAX_NESTING_LEVEL`, it throws a `TemplateException`. This prevents infinite recursion from causing a `StackOverflowError`.
 
-3. **Nesting and Shadowing (Rebinding)**:
-   - When a nested template include is detected (`{{include:nested}}`), line 319 initiates rebinding.
-   - It invokes `ScopedValue.where(RECURSION_DEPTH, currentDepth + 1).call(...)`. This constructs a new binding node on the thread's execution stack containing the incremented depth.
-   - During the nested execution of `processTemplateInternal()`, any calls to `RECURSION_DEPTH.get()` yield the new value (e.g., `1`, then `2`).
-   - The moment the child call completes, the thread pops the stack binding. The recursion depth is automatically restored to its previous value (e.g., `0`) for sibling directives without requiring manual decrements or cleanup blocks.
+3. **Nesting and Rebinding**:
+   - When a nested template include is found, the code increments the depth using `ScopedValue.where(RECURSION_DEPTH, currentDepth + 1).call(...)`.
+   - Any downstream calls to `RECURSION_DEPTH.get()` inside that call return the new incremented value.
+   - When the nested call finishes, the JVM pops the binding stack, automatically restoring the previous depth without manual cleanup.
 
 ---
 
 ### 2. FlattenedTransactionExample: Nested Transaction Coordination
-In transaction management frameworks, a common requirement is **transaction flattening**: if a transaction is already active when a nested service method is called, the nested operation should participate in the existing transaction rather than starting a new one.
+In transaction frameworks, **transaction flattening** is a common pattern: if a transaction is already active when a nested service method is called, the nested operation joins the existing transaction instead of starting a new one.
 
 ```java
 import java.util.concurrent.StructuredTaskScope;
@@ -518,28 +521,27 @@ public class FlattenedTransactionExample {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `FlattenedTransactionExample`
+##### Code Walkthrough: `FlattenedTransactionExample`
 
 1. **Outer Transaction Instantiation**:
-   - At line 361, `executeBusinessTransaction()` starts the transaction context by instantiating a `Transaction` record with the ID `"TX-OUTER-7788"`.
-   - Line 366 binds this instance to the `CURRENT_TX` scoped value: `ScopedValue.where(CURRENT_TX, outerTx).run(...)`. The lambda block defines the dynamic boundary of the transaction.
+   - `executeBusinessTransaction()` starts the transaction context by creating a `Transaction` record.
+   - It binds this instance to `CURRENT_TX` using `ScopedValue.where(CURRENT_TX, outerTx).run(...)`. The lambda block defines the transaction boundary.
 
-2. **Downstream Context Inspection (Flattening)**:
-   - Within the transaction scope, the service executes `performNestedBusinessLogic()`.
-   - At line 376, the method calls `CURRENT_TX.isBound()`. Since the method is running within the lambda execution chain of `executeBusinessTransaction()`, `isBound()` returns `true`.
-   - The method joins the active transaction by calling `CURRENT_TX.get()`, which retrieves the outer transaction instance reference without opening a new connection or allocating a nested transaction mapping.
-   - It performs its database write under the context of `"TX-OUTER-7788"`.
+2. **Downstream Context Inspection**:
+   - Within the transaction scope, the service runs `performNestedBusinessLogic()`.
+   - The method checks `CURRENT_TX.isBound()`. Since it is running inside the lambda of `executeBusinessTransaction()`, `isBound()` returns `true`.
+   - The method joins the active transaction by calling `CURRENT_TX.get()`, which retrieves the outer transaction reference without creating a new transaction.
+   - It runs its database write under the context of the outer transaction.
 
 3. **Standalone Fallback Path**:
-   - In Scenario 2 (line 419), `performNestedBusinessLogic()` is called directly from `main()` outside of any transaction scope.
-   - The call to `CURRENT_TX.isBound()` returns `false`.
-   - The method falls back to creating a local standalone transaction record `"TX-INNER-1122"`.
-   - It binds `"TX-INNER-1122"` using `ScopedValue.where(CURRENT_TX, innerTx).run(...)` to execute the fallback logic. This allows the nested service layer to remain functional whether it is executed standalone or nested inside an existing transactional service boundary.
+   - In Scenario 2, `performNestedBusinessLogic()` is called directly from `main()`, outside of any transaction scope.
+   - `CURRENT_TX.isBound()` returns `false`.
+   - The method falls back to creating a local standalone transaction record and binds it using `ScopedValue.where(CURRENT_TX, innerTx).run(...)` to execute the database write.
 
 ---
 
 ### 3. SimpleGraphicsExample: Rebinding Visual Context
-In UI rendering systems, parents components often set drawing properties (like colors and line widths) that apply to children components. We can model this drawing context using Scoped Values, showing how nested components temporarily override properties without manual cleanup.
+In UI rendering, parent components often set drawing properties (like colors or line widths) that apply to children. We can model this drawing context using Scoped Values, showing how nested components temporarily override properties without manual cleanup.
 
 ```java
 import java.awt.Color;
@@ -596,33 +598,33 @@ public class SimpleGraphicsExample {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `SimpleGraphicsExample`
+##### Code Walkthrough: `SimpleGraphicsExample`
 
 1. **Default Values Lookup**:
-   - At line 455, `drawLine()` executes. It calls `DRAW_COLOR.orElse(Color.BLACK)` and `LINE_WIDTH.orElse(1)`.
-   - In Scenario 1, the first line drawn is `RootLeft` to `RootRight` (line 491). Because no bindings are active on the call stack, the method falls back to `Color.BLACK` and `1px` width.
+   - `drawLine()` is called. It uses `DRAW_COLOR.orElse(Color.BLACK)` and `LINE_WIDTH.orElse(1)`.
+   - At the start, the first line is drawn from `RootLeft` to `RootRight`. Because no bindings are active on the stack, the method falls back to `Color.BLACK` and `1px` width.
 
-2. **Hierarchical theme binding**:
-   - Inside `drawPanel()`, line 464 binds `DRAW_COLOR` to `Color.GRAY` and `LINE_WIDTH` to `2`.
-   - The method invokes `drawLine("PanelTop", "PanelBottom")`, which resolves the properties from the parent stack frame, drawing a gray, 2px line.
+2. **Hierarchical Theme Binding**:
+   - Inside `drawPanel()`, the code binds `DRAW_COLOR` to `Color.GRAY` and `LINE_WIDTH` to `2`.
+   - It calls `drawLine("PanelTop", "PanelBottom")`, which resolves the properties from the stack frame, drawing a gray, 2px line.
 
 3. **Local Overriding (Rebinding)**:
-   - Line 470 calls `drawButton("Submit")`.
-   - Inside `drawButton()`, line 480 binds `DRAW_COLOR` to `Color.BLUE` and `LINE_WIDTH` to `4` for its own execution scope.
-   - The sub-line `BtnLeft` to `BtnRight` is drawn in blue with 4px width.
-   - When the button's `run()` scope exits, the JVM pops the blue theme bindings off the list.
-   - Sibling calls (such as line 473 `drawLine("PanelLeft", "PanelRight")` inside `drawPanel()`) automatically resolve back to `Color.GRAY` and `2px`.
-   - Finally, when `drawPanel()` exits and the main thread returns to `main()`, all bindings are cleared, and the final line `RootEndLeft` to `RootEndRight` renders in standard black and 1px width, demonstrating leak-free dynamic scoping.
+   - `drawPanel()` calls `drawButton("Submit")`.
+   - Inside `drawButton()`, the code binds `DRAW_COLOR` to `Color.BLUE` and `LINE_WIDTH` to `4` for its own scope.
+   - The line inside the button is drawn in blue with a 4px width.
+   - When the button's `run()` scope exits, the JVM pops the blue bindings.
+   - Subsequent calls inside `drawPanel()` (like `drawLine("PanelLeft", "PanelRight")`) automatically resolve back to `Color.GRAY` and `2px`.
+   - Finally, when `drawPanel()` exits, all bindings are cleared, and the final line `RootEndLeft` to `RootEndRight` renders in black and 1px width.
 
 ---
 
 ## 7. ScopedValue and Structured Concurrency
 
-When using virtual threads, concurrency patterns are heavily fanned out. In classic Java, passing context variables to child threads spawned via `ExecutorService` was highly expensive because it required duplicating thread-local maps.
+With virtual threads, tasks are often fanned out in parallel. In classic Java, passing context to child threads spawned via `ExecutorService` was expensive because it required copying thread-local maps.
 
-With the Structured Concurrency framework, the JVM employs **implicit context inheritance** through stack pointer referencing:
-- **Zero-Copy Reference Sharing**: When you call `StructuredTaskScope.fork()`, the JVM spawns a child virtual thread. Instead of allocating a new map for the child or copying parent entries, the child thread's internal configuration contains a direct reference pointing to the parent thread's active `ScopedValue` binding node on the stack.
-- **The ThreadFlock Boundary Protection**: Under normal thread pools, if a parent thread spawned a child and exited, the parent's stack frame would be destroyed. If the child subsequently tried to read parent stack references, it would trigger segmentation faults. Structured concurrency solves this via the strict nested boundary of `StructuredTaskScope.join()`: the parent thread cannot exit the try-with-resources scope until all child tasks finish executing. This guarantees the parent's stack remains alive and valid for the entire lifecycle of the child threads.
+With Structured Concurrency, the JVM uses **context inheritance** through stack pointer referencing:
+- **Zero-Copy Reference Sharing**: When you call `StructuredTaskScope.fork()`, the JVM spawns a child virtual thread. Instead of allocating a new map or copying entries, the child thread's internal state contains a direct reference to the parent thread's active `ScopedValue` binding node on the stack.
+- **Boundary Protection**: Under normal thread pools, if a parent thread spawned a child and exited, the parent's stack frame would be destroyed. If the child tried to read parent stack references, it would cause errors. Structured concurrency solves this with the strict nested boundary of `StructuredTaskScope.join()`: the parent thread cannot exit the try-with-resources scope until all child tasks finish. This guarantees the parent's stack remains valid while the child threads run.
 
 Let us visualize this stack pointer layout:
 
@@ -638,7 +640,7 @@ Let us visualize this stack pointer layout:
                         └─► StackBindings Pointer ────────► [Parent Binding Node]
 ```
 
-This stack-bound linkage allows child threads to read variables in $O(1)$ time with zero copy allocation cost at fork time. When the parent scope exits, the bindings automatically pop off the stack, keeping context sharing clean, fast, and leak-free.
+This stack-bound link lets child threads read variables in $O(1)$ time with zero copy cost at fork time. When the parent scope exits, the bindings are popped off the stack, keeping context sharing clean, fast, and leak-free.
 
 ```java
 // Forked subtasks inherit scope context implicitly:
@@ -658,48 +660,46 @@ ScopedValue.where(CURRENT_USER, "Alice").run(() -> {
 
 ---
 
-## 7. Beginner-Friendly Visualization: The Backpack and Locker Analogy
+## 8. Beginner-Friendly Visualization: The Backpack and Locker Analogy
 
-To understand why Java introduced Scoped Values to replace ThreadLocals, let us look at a simple, real-world office analogy.
+To understand why Java introduced Scoped Values to replace ThreadLocals, let us look at an office analogy.
 
-Imagine a large corporate office where workers (Threads) process requests for different customers. Each request needs specific documents (such as user credentials, transaction IDs, or localization settings) to be accessible by various departments (Service classes, Repositories).
+Imagine an office where workers (Threads) process requests. Each request needs specific files (like user credentials or transaction IDs) to be accessible by various departments (Service classes, Repositories).
 
 ### The ThreadLocal Model (The Office Locker)
 In the traditional ThreadLocal approach:
-- **The Lockers**: Every worker has their own personal metal locker next to their desk (ThreadLocalMap).
+- **The Lockers**: Every worker has their own personal metal locker next to their desk (`ThreadLocalMap`).
 - **The Process**:
-  - When a request arrives, the worker takes the customer's folder and puts it inside their personal locker (`ThreadLocal.set()`).
-  - As they do their work, different departments open the locker to read the folder.
+  - When a request arrives, the worker puts the customer's files inside their personal locker (`ThreadLocal.set()`).
+  - As they do their work, different departments open the locker to read the files.
   - **The Problems**:
-    1. **The Forgotten Clean-up**: When the worker finishes the request, they are supposed to empty the locker. But if they forget (`ThreadLocal.remove()`), the folder stays locked inside. Tomorrow, if the worker is assigned to a different customer, they open the locker and find yesterday's data! This causes **memory leaks** and **security context leaks**.
-    2. **High Real Estate Cost**: If you have 10,000 workers (virtual threads), you must buy 10,000 lockers, which takes up massive office space (RAM overhead).
-    3. **Expensive Copies for Helpers**: If a worker hires helper assistants (Forked child threads) to help with the work, the worker must copy all the papers from their locker into the assistants' lockers. This duplication is slow and wastes paper (Inheritance memory overhead).
+    1. **Forgotten Cleanup**: When the worker finishes the request, they are supposed to empty the locker. But if they forget (`ThreadLocal.remove()`), the files stay inside. Tomorrow, if the worker is assigned to a different customer, they open the locker and find yesterday's data. This causes **memory leaks** and **context leaks**.
+    2. **High Cost**: If you have 10,000 workers (virtual threads), you must buy 10,000 lockers, which takes up massive office space (RAM overhead).
+    3. **Expensive Copies for Helpers**: If a worker hires helpers (child threads) to assist, the worker must copy all the papers from their locker into the helpers' lockers. This copying is slow and wastes memory.
 
 ### The ScopedValue Model (The Stack-Bound Backpack)
 Project Loom replaces lockers with a temporary, stack-bound backpack:
-- **The Backpacks**: When a worker starts a request, they place the documents inside a temporary backpack (`ScopedValue.where(KEY, value)`).
+- **The Backpacks**: When a worker starts a request, they place the files inside a temporary backpack (`ScopedValue.where(KEY, value)`).
 - **The Process**:
   - The worker carries the backpack with them as they walk from department to department.
-  - When they call a method, they are simply handing access to the backpack. The data is **read-only** (immutable), so departments cannot alter the contents or create conflicting copies.
-  - **The Magic of Structured Concurrency**: If the worker forks child tasks, the child tasks do not get their own backpacks. Instead, they just reach into the parent's backpack while it is active in the room. This is **zero-copy reference sharing**.
-  - **Automatic Cleanup**: As soon as the worker finishes the request and walks out of the office room (exits the scope block), the backpack is automatically taken off their back and destroyed.
-  - Because the backpack's lifetime is bound to the lexical scope of the work method, it is **physically impossible** to forget to empty it. There are no lockers left locked, and memory is reclaimed instantly.
+  - When they call a method, they are simply giving access to the backpack. The data is **read-only** (immutable), so departments cannot change the contents.
+  - **Zero-Copy Sharing**: If the worker forks child tasks, the child tasks do not get their own backpacks. Instead, they just reach into the parent's backpack while it is active. This is **zero-copy reference sharing**.
+  - **Automatic Cleanup**: As soon as the worker finishes the request and exits the scope block, the backpack is automatically destroyed.
+  - Because the backpack's lifetime is bound to the execution scope, it is **impossible** to forget to empty it. There are no lockers left locked, and memory is reclaimed instantly.
 
 This is why Scoped Values are superior for virtual threads: they are lightweight, read-only, automatically cleaned up, and shared with child tasks without memory copying.
 
 ---
 
-## 8. Logging Interoperability: Mapped Diagnostic Context (MDC) Bridging
+## 9. Logging Interoperability: Mapped Diagnostic Context (MDC) Bridging
 
-In production enterprise applications, distributed tracing and correlation IDs are printed on every log message. Logging libraries (such as Logback or Log4j2) rely on **Mapped Diagnostic Context (MDC)**, which is backed by a standard ThreadLocal variable.
+In production applications, distributed tracing and correlation IDs are printed on every log message. Logging libraries (such as Logback or Log4j2) rely on **Mapped Diagnostic Context (MDC)**, which is backed by a standard `ThreadLocal` variable.
 
-When migrating to Scoped Values, logging libraries do not automatically detect our scoped value context. If we read `MDC.get("traceId")` inside a virtual thread running a scoped value task, it will return `null` because the MDC ThreadLocal map is empty.
+When migrating to Scoped Values, logging libraries do not automatically detect the scoped value context. If you read `MDC.get("traceId")` inside a virtual thread running a scoped value task, it returns `null` because the MDC ThreadLocal map is empty.
 
-To resolve this, we can write an integration bridge that copies scoped values to the MDC map when a context scope starts, and clears them when the scope exits.
+To resolve this, you can write an integration bridge that copies scoped values to the MDC map when a context scope starts, and clears them when the scope exits.
 
 ### The MDC Bridge Pattern (`MdcContextBridge.java`)
-
-Here is a clean, production-grade utility showing how to bridge Scoped Values to MDC:
 
 ```java
 package com.example.concurrency;
@@ -779,34 +779,34 @@ public class MdcContextBridge {
 ### Walkthrough: Logging Interoperability Mechanics
 
 1. **Dual Context Binding**:
-   - The method `callWithMdc()` binds the trace ID and tenant ID to Scoped Values first: `ScopedValue.where(TRACE_ID, traceId).where(TENANT_ID, tenantId)`.
+   - `callWithMdc()` binds the trace ID and tenant ID to Scoped Values: `ScopedValue.where(TRACE_ID, traceId).where(TENANT_ID, tenantId)`.
    - Within the bounded scope, we open a try-with-resources block initializing `MdcScope`.
-   - The constructor of `MdcScope` calls `MDC.put()`, writing the values to the logging framework's `ThreadLocalMap`.
+   - The constructor of `MdcScope` calls `MDC.put()`, writing the values to the logging framework's thread-local map.
 
 2. **Automatic MDC Cleanup**:
    - `MdcScope` implements `AutoCloseable`.
-   - When the task completes (or throws an exception), the try-with-resources statement invokes the `close()` method.
-   - The `close()` method executes `MDC.remove()`, removing the keys from the thread-local map. This prevents memory leaks and security context leaks if the virtual thread's carrier thread is recycled back into the scheduling pool.
+   - When the task completes (normally or with an exception), the try-with-resources statement calls `close()`.
+   - The `close()` method runs `MDC.remove()`, clearing the keys from the thread-local map. This prevents memory leaks when worker threads are recycled in a pool.
 
-3. **Downstream Logging Safety**:
-   - Any log output generated by logging libraries (e.g. logback pattern `%X{traceId}`) within the execution block will successfully extract the trace context, linking logs across parallel subtasks.
-
+3. **Downstream Logging**:
+   - Any log output generated by logging libraries (using the `%X{traceId}` pattern) inside the block will successfully extract the trace context, linking logs across parallel tasks.
 
 ---
 
-### Enterprise Context Propagation and Executor Decorators
+## 10. Enterprise Context Propagation and Executor Decorators
 
-#### The Thread Pool Bridging Challenge
-In classical Java architectures, asynchronous tasks are submitted to shared executors (`ThreadPoolExecutor` or `ForkJoinPool`). These executors run tasks on worker threads that are detached from the caller's context. 
-If a request thread sets MDC parameters or binds a `ScopedValue`, these bindings are thread-bound. As soon as a task is offloaded to an executor (e.g. `executor.submit(runnable)`), the executor thread has an empty MDC and unbound `ScopedValue` variables, resulting in log message disassociation and runtime exceptions.
+### The Thread Pool Bridging Challenge
+In typical architectures, asynchronous tasks are submitted to shared executors (`ThreadPoolExecutor` or `ForkJoinPool`). These executors run tasks on worker threads that are detached from the caller's context.
+
+If a request thread sets MDC parameters or binds a `ScopedValue`, these bindings are thread-bound. As soon as a task is offloaded to an executor (like `executor.submit(runnable)`), the executor thread has an empty MDC and unbound `ScopedValue` variables, resulting in missing log context and runtime exceptions.
 
 With `ScopedValue`, the framework provides `Carrier.run(Runnable)` or `Carrier.call(Callable)`. However, if you are fanning out tasks to an async executor, we must use a custom decorator to capture the caller's bindings and re-bind them inside the worker thread execution context.
 
-#### Capturing and Decorating Scoped Values
-To bridge Scoped Values across executor boundaries, we can use the `ScopedValue.Carrier` snapshotting mechanics or build custom decorators. The decorator wraps the submitted `Runnable` or `Callable` task:
-1. **Capturing**: At the task submission site (on the parent thread), the decorator captures the active ScopedValue mappings.
+### Capturing and Decorating Scoped Values
+To bridge Scoped Values across executor boundaries, we can build custom decorators. The decorator wraps the submitted `Runnable` or `Callable` task:
+1. **Capturing**: At task submission (on the parent thread), the decorator captures the active ScopedValue mappings.
 2. **Re-binding**: When the worker thread runs the task, it wraps the execution in a nested `ScopedValue.where(...)` block using the captured values.
-3. **MDC Synchronization**: Concurrently, the decorator copies the SLF4J MDC map, writing it to the worker thread's MDC before execution, and clearing it in a `finally` block to prevent thread pool leaks.
+3. **MDC Synchronization**: Concurrently, the decorator copies the SLF4J MDC map, writes it to the worker thread's MDC before execution, and clears it in a `finally` block to prevent thread pool leaks.
 
 Let's look at a complete, production-grade implementation of a Context-Aware Executor Decorator:
 
@@ -950,66 +950,66 @@ public class EnterpriseContextPropagator implements ExecutorService {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `EnterpriseContextPropagator`
+##### Code Walkthrough: `EnterpriseContextPropagator`
 
 1. **Context Capture on Submission**:
-   - At line 32, when a request thread executes `MDC.getCopyOfContextMap()`, the wrapper extracts the caller's active map entries.
-   - At lines 35-39, the wrapper captures current `USER_PRINCIPAL` and `CORRELATION_ID` variables using `ScopedValue.isBound()` and `ScopedValue.get()`. This is run on the parent thread before submitting the execution task to the thread pool.
+   - When a task is submitted, the decorator runs `MDC.getCopyOfContextMap()` to extract the active MDC entries.
+   - It captures the current `USER_PRINCIPAL` and `CORRELATION_ID` using `ScopedValue.isBound()` and `ScopedValue.get()`. This occurs on the parent thread before submitting the task to the executor.
 
 2. **Re-binding inside the Worker Thread**:
-   - The returned `Runnable` lambda (lines 41-70) runs inside the pool's thread.
-   - Line 43 reconstructs the `ScopedValue.Carrier` instance using the parent's values: `ScopedValue.Carrier carrier = ScopedValue.where(USER_PRINCIPAL, principal)`.
-   - Line 53 invokes `finalCarrier.run(...)` which pushes the bindings onto the executing thread's stack frame.
-   - Line 56 sets the worker thread's MDC context: `MDC.setContextMap(finalParentMdc)`.
+   - The returned `Runnable` lambda runs inside the worker thread.
+   - It reconstructs the `ScopedValue.Carrier` using the parent's values: `ScopedValue.Carrier carrier = ScopedValue.where(USER_PRINCIPAL, principal)`.
+   - It calls `finalCarrier.run(...)` to push the bindings onto the executing thread's stack.
+   - It sets the worker thread's MDC context: `MDC.setContextMap(finalParentMdc)`.
 
-3. **Leak-Free Resource Cleanup**:
-   - The task executes within a try-finally block.
-   - Line 64 calls `MDC.clear()` inside the `finally` block, removing tracing data from the executor's thread-local storage, ensuring that subsequent tasks run with clean logs and preventing memory leaks.
+3. **Cleanup**:
+   - The task runs in a try-finally block.
+   - The `finally` block calls `MDC.clear()`, removing the logging context from the worker thread's thread-local storage to prevent leaks.
 
-#### Performance Footprint: Context Propagation Analysis
-In extreme scale microservices fanning out thousands of parallel sub-requests, propagation mechanics must be heavily optimized:
+### Performance Footprint: Context Propagation Analysis
+In systems fanning out thousands of parallel sub-requests, context propagation must be fast:
 1. **MDC Copying Overhead**:
-   - `MDC.getCopyOfContextMap()` makes a full copy of the underlying `HashMap` (backed by a platform `ThreadLocal`). Under millions of ops/sec, this creates significant garbage collection pressure on the Eden space due to map instantiation and entry array copies.
-   - *Optimization*: Limit MDC usage to a few critical tracing fields (`traceId`, `spanId`) instead of storing large user payloads in logging maps.
+   - `MDC.getCopyOfContextMap()` copies the underlying `HashMap` (backed by a platform `ThreadLocal`). Under high loads, this can create garbage collection pressure due to map and entry allocations.
+   - *Optimization*: Limit MDC usage to a few critical tracing fields (`traceId`, `spanId`) instead of storing large payloads.
 2. **Scoped Value Stack-Based Lookup Overhead**:
-   - Unlike ThreadLocal (which resolves values by indexing a hash map table), Scoped Values are resolved by walking the snapshot frame chain on the thread stack.
+   - Unlike `ThreadLocal` (which resolves values by indexing a map table), Scoped Values are resolved by walking the snapshot chain on the thread stack.
    - When calling `ScopedValue.get()`, the JVM traverses from the current binding head back to the root node.
-   - If the nesting depth is high (e.g. 20 nested `ScopedValue.where` bindings), lookup transitions from $O(1)$ to $O(N)$ stack traverses. However, because these references are contiguous in memory, JVM L1/L2 caches keep lookup latency extremely low (a few nanoseconds).
-   - Binding allocations are stack-scoped and compiled away by the JIT compiler via Escape Analysis, leading to near-zero heap allocations.
+   - If the nesting depth is high, lookup transitions from $O(1)$ to $O(N)$ stack traverses. However, because these references are contiguous in memory, CPU caches keep lookup latency low (typically a few nanoseconds).
+   - Binding allocations are stack-scoped and can be optimized away by the JIT compiler via Escape Analysis, leading to near-zero heap allocations.
 
 ---
 
-## 9. Memory Profile Analysis: ThreadLocal vs ScopedValue
+## 11. Memory Profile Analysis: ThreadLocal vs ScopedValue
 
-To understand the difference in resource consumption, let us analyze the allocation footprints under high load.
+To understand the difference in memory use, let us analyze the allocation footprints under high load.
 
 ### ThreadLocal Footprint
-Every thread allocating thread-local variables maintains an active `ThreadLocalMap` instance containing a table array of `Entry` objects.
+Every thread allocating thread-local variables maintains an active `ThreadLocalMap` containing a table array of `Entry` objects.
 
 $$\text{ThreadLocal Footprint} = T \times \left( M_{\text{map}} + \sum (E_{\text{entry}} + O_{\text{payload}}) \right)$$
 
 Where:
 * $T$ is the number of threads.
 * $M_{\text{map}}$ is the map container allocation overhead (~64 bytes).
-* $E_{\text{entry}}$ is the map table array element reference footprint.
+* $E_{\text{entry}}$ is the map table array element reference size.
 * $O_{\text{payload}}$ is the context payload object size.
 
-If $T = 1,000,000$ virtual threads and we place a 500KB context configuration payload inside:
-* If each thread allocates/duplicates the payload (or maintains individual map structures), memory consumption increases by hundreds of megabytes in garbage collector queues.
-* Forgotten cleanup means the objects remain pinned in memory indefinitely, causing long GC pauses or memory exhaustion.
+If $T = 1,000,000$ virtual threads and we place a 500KB context payload inside:
+* If each thread allocates or copies the payload, memory use increases by hundreds of megabytes.
+* Forgotten cleanup means the objects remain pinned in memory, causing long GC pauses or memory exhaustion.
 
 ### ScopedValue Footprint
-Scoped values do not allocate map container objects inside the thread structures. Bindings are tracked via a single list pointer associated with the executing scope.
+Scoped values do not allocate map container objects inside thread structures. Bindings are tracked via a single list pointer associated with the executing scope.
 
 $$\text{ScopedValue Footprint} = O_{\text{payload}} + T \times (\text{Pointer Link Reference})$$
 
-Since the payload is immutable, a single instance of `LargePayload` is instantiated once by the coordinator and shared via lightweight stack reference pointers among all child subtask virtual threads. This reduces memory allocations to near-zero.
+Since the payload is immutable, a single instance of the payload is created once and shared via stack pointers among all child virtual threads. This reduces memory allocations to near-zero.
 
 ---
 
-## 9. Hands-On Labs
+## 12. Hands-On Labs
 
-Ensure you compile and execute these labs using the preview flags:
+Compile and execute these labs using the preview flags:
 ```powershell
 javac --enable-preview --release 25 Lab.java
 java --enable-preview Lab
@@ -1018,7 +1018,7 @@ java --enable-preview Lab
 ---
 
 ### Lab 5.1 — Request Context without Parameter Pollution
-**Objective**: Build a request context propagation simulator. Set the transaction properties in the Controller block, and access them downstream in Service and Repository layers without passing context parameters.
+**Objective**: Build a request context propagation simulator. Set the transaction properties in the Controller, and access them downstream in Service and Repository layers without passing parameters.
 
 ```java
 import java.util.NoSuchElementException;
@@ -1086,20 +1086,20 @@ public class Lab51RequestContext {
 
 #### Step-by-Step Logic Walkthrough
 1. **Context Initialization**:
-   - We define `WEB_CONTEXT` as a `public static final ScopedValue<RequestContext>`. It acts as our application's context registry.
-2. **Dynamic Binding Phase**:
+   - We define `WEB_CONTEXT` as a `public static final ScopedValue<RequestContext>`. It acts as our context registry.
+2. **Dynamic Binding**:
    - In `WebController.handleRequest()`, we create a `RequestContext` record.
-   - We invoke `ScopedValue.where(WEB_CONTEXT, context).run(...)`. The lambda block defines the dynamic boundary scope. The JVM registers this binding under the calling thread's stack.
+   - We call `ScopedValue.where(WEB_CONTEXT, context).run(...)`. The lambda block defines the dynamic scope, and the JVM registers this binding on the calling thread's stack.
 3. **Downstream Retrieval**:
-   - `BusinessService` invokes `WEB_CONTEXT.isBound()` to verify if context exists, printing user information if it is present.
-   - `DatabaseRepository` calls `WEB_CONTEXT.orElse(...)`. If the context is unbound (as seen in Scenario 2), it yields the default guest context record without throwing a `NoSuchElementException`.
+   - `BusinessService` calls `WEB_CONTEXT.isBound()` to check if the context exists, printing user info if present.
+   - `DatabaseRepository` calls `WEB_CONTEXT.orElse(...)`. If the context is unbound (as in Scenario 2), it returns the default guest context without throwing a `NoSuchElementException`.
 4. **Scope Exiting**:
-   - When the `run()` block finishes execution, the JVM automatically pops the binding, ensuring that no request leak occurs.
+   - When the `run()` block finishes, the JVM automatically pops the binding, preventing context leaks.
 
 ---
 
 ### Lab 5.2 — ScopedValue + StructuredTaskScope
-**Objective**: Bind a trace context, spawn two concurrent subtasks inside a `StructuredTaskScope` block, and verify that both subtasks successfully inherit the binding inside their execution blocks.
+**Objective**: Bind a trace context, spawn two concurrent subtasks inside a `StructuredTaskScope` block, and verify that both subtasks inherit the binding.
 
 ```java
 import java.time.Duration;
@@ -1146,21 +1146,21 @@ public class Lab52ScopedStructured {
 ```
 
 #### Step-by-Step Logic Walkthrough
-1. **Binding Context at Request Boundary**:
-   - The main thread enters a `ScopedValue.where(GLOBAL_TRACE_ID, "TX-889900").run(...)` scope, establishing the parent environment bindings.
+1. **Binding Context**:
+   - The main thread enters `ScopedValue.where(GLOBAL_TRACE_ID, "TX-889900").run(...)`, setting the parent bindings.
 2. **Concurrent Forking**:
-   - Within `executeConcurrentAggregation()`, we open a `StructuredTaskScope` containment block.
-   - We fork `userTask` and `accountTask`. This instructs the JVM to spawn two new virtual threads to execute the task lambdas.
-3. **Inheritance without Duplication**:
-   - Under the hood, the JVM thread scheduler maps the child virtual threads' parentage to the main thread's stack. 
-   - When the child threads invoke `GLOBAL_TRACE_ID.get()`, they traverse the pointer references back to the main thread's stack frame. This represents **zero-copy reference sharing** with zero allocation overhead.
+   - Inside `executeConcurrentAggregation()`, we open a `StructuredTaskScope`.
+   - We fork `userTask` and `accountTask`, which tells the JVM to spawn two virtual threads.
+3. **Context Inheritance**:
+   - The JVM links the child virtual threads' bindings to the main thread's stack.
+   - When the child threads call `GLOBAL_TRACE_ID.get()`, they traverse pointers back to the main thread's stack frame. This is **zero-copy reference sharing** with zero allocation cost.
 4. **Coordination**:
-   - The parent thread blocks on `scope.join()`, waiting for both child threads to finish before printing the aggregated outcome.
+   - The parent thread blocks on `scope.join()`, waiting for both child threads to finish before printing the results.
 
 ---
 
 ### Lab 5.3 — ThreadLocal vs ScopedValue Memory Profile
-**Objective**: Create a simulator demonstrating the heap allocation difference between storing state inside `ThreadLocal` vs using `ScopedValue` reference sharing across 10,000 virtual threads.
+**Objective**: Demonstrate the memory difference between storing state inside `ThreadLocal` vs using `ScopedValue` reference sharing across 10,000 virtual threads.
 
 ```java
 import java.util.concurrent.ExecutorService;
@@ -1210,19 +1210,18 @@ public class Lab53MemoryProfileDemo {
 
 #### Step-by-Step Logic Walkthrough
 1. **Heavy Configuration Payload**:
-   - We create a `HeavyConfig` class containing a 500KB byte array payload. This simulates metadata caches, security tokens, or localization dictionary tables.
-2. **Scoped Value Sharing Execution**:
-   - A single instance of `HeavyConfig` is initialized.
-   - We loop 10,000 times, executing tasks inside a virtual thread executor. Each task binds the *same* configuration instance to the `SCOPED_VALUE_CONFIG`.
-   - Because `ScopedValue` is immutable and shares the single reference pointer across the scope chain, memory usage is minimal. 
+   - We create a `HeavyConfig` class containing a 500KB byte array. This simulates metadata caches, security tokens, or localization tables.
+2. **Scoped Value Sharing**:
+   - A single instance of `HeavyConfig` is created.
+   - We loop 10,000 times, running tasks inside a virtual thread executor. Each task binds the same configuration instance to `SCOPED_VALUE_CONFIG`.
+   - Because Scoped Values are immutable, they share the single reference across the scope chain, keeping memory use minimal.
 3. **Comparing with ThreadLocal**:
-   - If we had used `ThreadLocalMap` or `InheritableThreadLocal` for 10,000 threads, each thread would allocate its own Map structure containing entry tables and key/value bindings.
-   - In workloads with deep inheritance or thread pools, this leads to heap inflation and garbage collector churn, which Scoped Values avoid entirely.
+   - If we used `ThreadLocalMap` or `InheritableThreadLocal` for 10,000 threads, each thread would allocate its own Map structure containing entry tables and bindings.
+   - In workloads with deep inheritance or thread pools, this leads to heap inflation and garbage collector churn, which Scoped Values avoid.
 
 ---
 
-
-## 10. Pitfalls & Knowledge Check
+## 13. Pitfalls & Knowledge Check
 
 ### Common Pitfalls
 
@@ -1475,17 +1474,16 @@ When profiling a high-concurrency microservice under high load, which JFR event 
 *Answer*: **B**
 - *Explanation*: The JVM profiles ScopedValue performance using internal metrics and custom event hooks. Monitoring these events helps identify excessive binding allocations or deep lookup traversal paths in complex execution trees.
 
-
 ---
 
-### 11. Design Patterns for Context Sharing: When to use Scoped Values, ThreadLocals, and Method Parameters
+## 14. Design Patterns for Context Sharing: When to use Scoped Values, ThreadLocals, and Method Parameters
 
-When building enterprise applications, developers often need to propagate metadata (such as authentication roles, database transactions, correlation IDs, or localization settings) from the web request entry point down to the database access layer.
+When building applications, developers often need to propagate metadata (such as roles, transactions, or tracing IDs) from the entry point down to the database layer.
 
-There are three primary design patterns for context sharing in Java. Understanding their mechanics and trade-offs is key to writing clean, high-performance concurrent code.
+There are three main design patterns for context sharing in Java.
 
 #### Pattern 1: Explicit Parameter Passing
-In this pattern, context is passed as an explicit argument to every method in the call stack.
+In this pattern, context is passed as an argument to every method in the call stack.
 
 ##### Code Example:
 ```java
@@ -1508,16 +1506,16 @@ public class OrderService {
 ```
 
 * **Pros**:
-  - **Type Safety and Transparency**: It is completely clear what dependencies a method has.
-  - **Easy Testing**: You can test methods in isolation by passing mock arguments, without setting up thread states.
-  - **No Magic**: No reflection, thread-bound maps, or JVM optimizations are involved.
+  - **Type Safety and Transparency**: It is clear what dependencies a method has.
+  - **Easy Testing**: You can test methods in isolation by passing arguments, without setting up thread states.
+  - **No Magic**: No reflection, thread-bound maps, or special JVM features are needed.
 * **Cons**:
-  - **Parameter Pollution**: Every method in the call stack must declare the parameter, even if it does not use the data itself and only passes it to the next method. This leads to cluttered, boilerplate-heavy signatures.
+  - **Parameter Pollution**: Every method in the stack must declare the parameter, even if it only passes it down. This leads to cluttered method signatures.
 
 ---
 
 #### Pattern 2: ThreadLocal (Mutable & Persistent)
-In this pattern, context is stored in a thread-bound map, allowing methods to retrieve it implicitly without modifying method signatures.
+In this pattern, context is stored in a thread-bound map, letting methods retrieve it implicitly.
 
 ##### Code Example:
 ```java
@@ -1531,16 +1529,16 @@ public class SecurityContextHolder {
 ```
 
 * **Pros**:
-  - **Clean Signatures**: Method signatures remain focused on business parameters.
-  - **Mutability**: The thread context can be updated at any point during execution (e.g., swapping users mid-transaction).
+  - **Clean Signatures**: Method signatures focus only on business parameters.
+  - **Mutability**: The context can be updated at any point during execution.
 * **Cons**:
-  - **Memory Leaks**: If `clear()` is not called inside a `finally` block, the data remains in the thread pool worker, causing memory leaks and security issues.
-  - **Loom Overhead**: Allocating a map structure for millions of virtual threads consumes massive memory.
+  - **Memory Leaks**: If you do not call `clear()` in a `finally` block, data remains in the thread, causing leaks in pools.
+  - **Virtual Thread Overhead**: Allocating maps for millions of virtual threads consumes too much memory.
 
 ---
 
 #### Pattern 3: ScopedValue (Immutable & Lexically-Scoped)
-This pattern binds read-only context to the dynamic execution scope of a method block.
+This pattern binds read-only context to the execution scope of a method block.
 
 ##### Code Example:
 ```java
@@ -1560,12 +1558,12 @@ public class ScopedSecurityHolder {
 ```
 
 * **Pros**:
-  - **Automatic Safety**: Cleaned up automatically when the execution block exits, making leaks impossible.
+  - **Automatic Safety**: Cleaned up automatically when the block exits, preventing leaks.
   - **Zero-Copy Inheritance**: Inherited by structured subtasks without copying maps.
-  - **Memory Efficiency**: Stored on the stack as lightweight pointers, optimized for virtual threads.
+  - **Memory Efficiency**: Stored as stack pointers, optimized for virtual threads.
 * **Cons**:
-  - **Immutability**: Values are read-only; updating a value requires nesting another scope (`shadowing`).
-  - **Access Restrictions**: Attempting to read outside the dynamic scope throws a `NoSuchElementException`.
+  - **Immutability**: Values are read-only; updating a value requires nesting another scope (shadowing).
+  - **Access Restrictions**: Reading outside the dynamic scope throws a `NoSuchElementException`.
 
 ---
 
@@ -1582,48 +1580,42 @@ public class ScopedSecurityHolder {
 
 #### Decision Matrix: Which Pattern to Choose?
 - Choose **Parameter Passing** for simple, shallow call stacks where only one or two components need the data.
-- Choose **ScopedValue** for cross-cutting request metadata (tracing IDs, user credentials) that must propagate deeply down your service stacks without cluttering signatures, especially when running on virtual threads.
-- Choose **ThreadLocal** only if you genuinely require a mutable, thread-confined scratchpad where context must be updated dynamically within the thread lifecycle (e.g. database transaction state managers).
-
+- Choose **ScopedValue** for cross-cutting request metadata (like tracing IDs or credentials) that must propagate deeply down service stacks without cluttering signatures, especially on virtual threads.
+- Choose **ThreadLocal** only if you genuinely need mutable, thread-confined state that must be updated dynamically within the thread lifecycle (such as transaction state managers).
 
 ---
 
-### 12. Scoped Values under the Microscope: How JIT Compiler Escape Analysis optimizes bindings
+## 15. Scoped Values under the Microscope: How JIT Compiler Escape Analysis optimizes bindings
 
-While Scoped Values provide great API benefits, their implementation is heavily optimized by the JVM's **Just-In-Time (JIT) Compiler** (the C2 compiler) to ensure they introduce near-zero runtime overhead.
+While Scoped Values provide API benefits, their implementation is optimized by the JVM's **Just-In-Time (JIT) Compiler** to ensure near-zero runtime overhead.
 
-To understand how this works, we must look at how the JIT compiler analyzes the execution paths of scoped value binding scopes:
+The JIT compiler optimizes the execution paths of scoped value binding scopes:
 
 #### 1. Escape Analysis (EA)
-When you execute a scoped value binding block:
+When you run a binding block:
 ```java
 ScopedValue.where(TRACE_ID, "TX-100").run(() -> {
     executeTask();
 });
 ```
-The compiler compiles the lambda runnable and the `ScopedValue.Carrier` instance. During compilation, the JIT executes **Escape Analysis**:
-- It analyzes the scope of the `Carrier` object and the lambda closure.
-- Since the lambda only runs within the `run()` method and does not get assigned to a field or returned from the method, the JIT detects that these objects **do not escape the compiling thread stack**.
+The compiler analyzes the lambda runnable and the `ScopedValue.Carrier` instance. During compilation, the JIT runs **Escape Analysis**:
+- It analyzes the scope of the `Carrier` object and the lambda.
+- Since the lambda only runs within the `run()` method and is not assigned to a field or returned, the JIT detects that these objects **do not escape the compiling thread stack**.
 
 #### 2. Scalar Replacement
-Once Escape Analysis proves that the carrier and closure objects do not escape the stack, the JIT compiler applies **Scalar Replacement**:
-- The JVM decomposes the carrier object into its individual fields (primitive reference fields).
-- Instead of allocating the `Carrier` object on the heap, the fields are placed directly in CPU registers or on the thread stack.
-- This completely eliminates heap allocation overhead. The garbage collector never has to scan or clean up these short-lived objects.
+Once Escape Analysis proves the carrier and closure objects do not escape the stack, the JIT compiler applies **Scalar Replacement**:
+- The JVM decomposes the carrier object into its individual fields.
+- Instead of allocating the `Carrier` object on the heap, the fields are placed directly in CPU registers or on the stack.
+- This eliminates heap allocation overhead. The garbage collector never has to scan or clean up these short-lived objects.
 
 #### 3. Lock Elimination
-In traditional `ThreadLocalMap` lookups, threads must synchronize or execute CAS operations when resizing maps or resolving hash collisions.
-Because Scoped Values are immutable and stack-bound, lookups involve simple stack traversal. The JIT compiler detects that no concurrent modifications are possible within the scope, and eliminates any internal lock or barrier instructions, compiling lookups down to raw memory address reads.
+In traditional `ThreadLocalMap` lookups, threads must synchronize or run CAS operations when resizing maps or resolving collisions.
+Because Scoped Values are immutable and stack-bound, lookups use simple stack traversal. The JIT compiler detects that no concurrent modifications are possible, and eliminates internal lock or barrier instructions, compiling lookups down to direct memory reads.
 
 #### 4. Method Inlining
-When the lookup method `TRACE_ID.get()` is invoked, the JIT compiler attempts to **inline** the method call:
-- It replaces the method call instruction with the actual body of the lookup logic.
+When calling `TRACE_ID.get()`, the JIT compiler attempts to **inline** the method:
+- It replaces the method call with the actual body of the lookup logic.
 - If the scope depth is constant, the compiler flattens the pointer dereferencing sequence.
-- This reduces the execution path to a direct offset memory read, making scoped value lookups run at the speed of standard local variable reads.
+- This reduces the lookup to a direct offset memory read, making scoped value lookups run at the speed of standard local variable reads.
 
-This mechanical synergy between the JIT compiler and the stack-based scoping design is what makes Scoped Values extremely efficient, allowing Java applications to handle millions of dynamic context mappings with zero garbage collection overhead.
-
----
-
-
-
+This combination of stack-based design and JIT optimization makes Scoped Values extremely efficient, letting Java applications handle millions of context mappings with zero garbage collection overhead.

@@ -8,13 +8,13 @@ In this module, we will explore **Structured Concurrency**—a paradigm that tre
 
 ## 1. The Challenge of Unstructured Concurrency
 
-Historically, Java concurrent programming has relied on abstractions like `ExecutorService` and `Future`. This model is referred to as **unstructured concurrency** because tasks are treated as independent, decoupled execution paths. The lifetime of a subtask is not structurally bound to its parent or siblings.
+Java has traditionally used `ExecutorService` and `Future` for concurrency. This is called **unstructured concurrency** because tasks are independent of each other. A subtask's lifetime is not tied to its parent or sibling tasks.
 
 ### Core Problems of Unstructured Concurrency
 
-1. **Thread/Resource Leaks**: If a parent task fails or times out, there is no automatic cleanup of its children. The child threads continue executing in the background, consuming memory and CPU cycles on operations whose results will ultimately be discarded.
-2. **Lack of Automatic Cancellation**: If one subtask fails in a group of sibling tasks where all results are required, the other subtasks keep running. In unstructured models, cancellation must be manually orchestrated using cooperative interruption check loops.
-3. **Incomplete Data Wait**: If one subtask fails quickly, the parent thread still blocks waiting for the other slow-running subtasks to complete (via `Future.get()`) before it can bubble up the failure, wasting valuable response time.
+1. **Thread/Resource Leaks**: If a parent task fails or times out, its child tasks are not automatically cleaned up. They keep running in the background, wasting CPU and memory.
+2. **No Automatic Cancellation**: If one subtask fails in a group where all are needed, the others keep running. You have to cancel them manually.
+3. **Slow Error Response**: If one subtask fails quickly, the parent thread still blocks waiting for other slow subtasks to finish (via `Future.get()`) before it can throw the error, wasting time.
 
 ### Visualizing the Resource Leak
 
@@ -98,28 +98,17 @@ public class UnstructuredProductService {
 }
 ```
 
-##### Line-by-Line Code Walk: `UnstructuredProductService`
+##### How the Unstructured Product Service Works
 
-1. **Unbounded Task Spawning (`submit()`)**:
-   - At lines 56 and 57, the method `fetchProductInfo` submits two separate asynchronous task callables to the virtual executor.
-   - When using `Executors.newVirtualThreadPerTaskExecutor()`, the executor does not maintain a pool of reusable threads. Instead, it instantiates a brand new virtual thread for *every single task* submitted via `submit()`.
-   - The primary thread immediately receives two `Future` references (`productTask` and `reviewsTask`) and continues execution without blocking. The state of these futures is initially set to `NEW`.
-
-2. **Synchronous Resolution Bottleneck**:
-   - At line 60, the primary thread executes `Product product = productTask.get()`. This is a blocking retrieval method.
-   - The calling thread (the main thread) is parked and yields its carrier thread. It will remain suspended until `fetchProduct` completes (normally or exceptionally).
-   - If `fetchProduct` takes 5 seconds, the main thread remains parked here, even if `fetchReviews` has already completed or failed.
-
-3. **The Try-With-Resources Exception Flow and Latency Penalty**:
-   - The task `fetchProduct` is simulated to throw a `RuntimeException` after 1 second.
-   - At $t = 1\text{s}$, the virtual thread executing `fetchProduct` transitions to the `EXCEPTIONAL` state, and its exception is saved within the `FutureTask` structure.
-   - The blocked main thread is unparked, reads the failure state from `productTask`, and throws an `ExecutionException` from line 60.
-   - Because the `ExecutorService` was opened within a **try-with-resources** statement, the JVM must clean up the resource before executing the `catch` block. It calls `executor.close()` automatically.
-   - For `newVirtualThreadPerTaskExecutor()`, the `close()` method is implemented to block the caller until all outstanding threads have terminated (similar to calling `shutdown()` followed by `awaitTermination()`).
-   - Therefore, the main thread blocks at the closing brace of the `try` block. It remains suspended from $t = 1\text{s}$ to $t = 5\text{s}$ waiting for the sibling task (`fetchReviews`) to finish executing.
-   - At $t = 5\text{s}$, `fetchReviews` completes, prints `"Reviews fetch complete!"`, and returns. Only then does `executor.close()` release its block on the main thread.
-   - The main thread finally enters the `catch` block (line 64), prints the error message, throws the wrapped `RuntimeException`, and runs the `finally` block.
-   - As a result, the total elapsed time printed is **5000+ ms**, even though the fatal error occurred at $t = 1\text{s}$! This latency bottleneck wastes server response time and retains memory allocations.
+1. **Spawning Tasks (`submit()`)**: We submit two tasks to the virtual executor. Since it is a virtual thread executor, it spawns a brand new virtual thread for each task instead of using a pool. The main thread immediately gets two `Future` objects.
+2. **Blocking Wait**: The main thread calls `productTask.get()`, which blocks. The main thread goes to sleep, freeing its carrier thread, until the product task completes.
+3. **Errors and Latency Penalty**:
+   - `fetchProduct` is simulated to fail after 1 second.
+   - When it fails, `productTask.get()` throws an `ExecutionException`.
+   - Since the executor is inside a try-with-resources block, it automatically calls `executor.close()` when exiting the block.
+   - However, `close()` blocks the main thread until all outstanding threads (like `fetchReviews`, which takes 5 seconds) finish.
+   - So, the main thread is frozen from 1 second to 5 seconds just waiting for the sibling task to finish, even though we already know the overall operation failed.
+   - This makes the total time **5 seconds** instead of **1 second**, wasting time and resources.
 
 #### Console Output Analysis
 When executing this unstructured code, the JVM logs show:
@@ -137,32 +126,30 @@ When executing this unstructured code, the JVM logs show:
 Structured Concurrency addresses these issues by enforcing a strict **parent-child hierarchy** on concurrent tasks, mapping the execution control flow to the lexical scope of the code block.
 
 ```
-       [Parent Scope Start]
-                │
-        ┌───────┴───────┐
-        ▼               ▼
-   [Subtask A]     [Subtask B]
-        │               │
-        └───────┬───────┘
-                ▼
-          [Scope Join]
-                │
-        [Parent Scope End]
+        [Parent Scope Start]
+                 │
+         ┌───────┴───────┐
+         ▼               ▼
+    [Subtask A]     [Subtask B]
+         │               │
+         └───────┬───────┘
+                 ▼
+           [Scope Join]
+                 │
+         [Parent Scope End]
 ```
 
 ### Core Principles
-1. **Task Boundary Scope**: If a block of code splits execution into multiple concurrent subtasks, all subtasks must return to the same join point before the block can be exited.
-2. **Supervised Lifetime**: The parent task acts as a supervisor. If any subtask fails, the parent scope automatically triggers a cooperative cancellation of all sibling subtasks.
-3. **No Orphan Threads**: When the scope closes, Java guarantees that all concurrent subtasks have terminated (either by completing successfully, throwing an exception, or being canceled and responding to interruption).
-4. **Declarative Concurrency**: Code reads sequentially. Errors and cancellations propagate up the stack in a unified path, making execution predictable and debugging trivial.
+1. **Task Boundaries**: All subtasks spawned within a block must finish or be cancelled before the block exits.
+2. **Supervised Lifetime**: The parent task acts as a supervisor. If a subtask fails, the parent scope automatically cancels all sibling subtasks.
+3. **No Orphan Threads**: When the scope closes, Java guarantees that all subtasks have terminated.
+4. **Simple Code**: Code reads sequentially, and errors propagate cleanly up the stack.
 
 ---
 
 ## 3. The `StructuredTaskScope` API
 
-At the heart of modern Java structured concurrency lies the `StructuredTaskScope` API (introduced as a preview feature in JDK 24/25 via JEP 487). 
-
-`StructuredTaskScope` implements `AutoCloseable` and must be used within a `try-with-resources` block.
+Java's `StructuredTaskScope` API (a preview feature in JDK 24/25) is the core of structured concurrency. It implements `AutoCloseable` and must be used within a `try-with-resources` block.
 
 ```java
 try (var scope = StructuredTaskScope.open()) {
@@ -176,54 +163,37 @@ try (var scope = StructuredTaskScope.open()) {
 } // scope.close() is called automatically here
 ```
 
-##### Deep Architectural Analysis: StructuredTaskScope Mechanics
+##### How StructuredTaskScope Works
 
-1. **Instantiation and ThreadFlock Binding (`open()`)**:
-   - `StructuredTaskScope.open()` instantiates a thread containment scope, constructing an internal coordinate supervisor called a `ThreadFlock`.
-   - The constructor captures the calling thread (the owner thread) and binds it. Only the owner thread is permitted to call `join()` or `close()`. If another thread attempts to do so, the JVM throws an `IllegalStateException`.
-   - The flock tracks all child threads spawned within this boundary. The scope implements `AutoCloseable`, which guarantees that the block cannot be exited without joining and closing.
-
-2. **Virtual Thread Spawning and Subtask States (`fork()`)**:
-   - When you call `scope.fork(Callable)`, the JVM constructs a new virtual thread under the hood. The task does not execute on the parent thread.
-   - The return value is a `Subtask<T>` handle. The `Subtask` is an immutable view of the task's state. It has a state machine with three distinct states:
-     - `UNAVAILABLE`: The task is running, has not started, or was canceled before execution.
-     - `SUCCESS`: The task completed successfully. You can call `.get()` to retrieve the result.
-     - `FAILED`: The task threw an exception. You can call `.exception()` to retrieve the `Throwable`.
-   - **State Isolation Rule**: Calling `subtask.get()` or `subtask.exception()` while in the `UNAVAILABLE` state (e.g., before calling `scope.join()`) immediately throws an `IllegalStateException`. This prevents developers from accidentally introducing race conditions by accessing partial data.
-
-3. **Coordinated Suspension and CPU Release (`join()`)**:
-   - Calling `scope.join()` suspends the parent owner thread. It unmounts from its carrier thread and yields execution, freeing the CPU core to run other workloads.
-   - The scope utilizes an event-based callback listener (the `Joiner` policy). As each child virtual thread completes, it triggers a completion callback.
-   - In a fail-fast scope (created with the default `awaitAllSuccessfulOrThrow()` joiner), if any subtask throws an exception, the joiner intercepts the event, flags the scope as canceled, and interrupts the owner thread to wake it from `join()` early, preventing it from wasting time waiting for other slow tasks.
-
-4. **Cooperative Interruption and Scope Containment (`close()`)**:
-   - The try-with-resources statement ensures `scope.close()` is called automatically when exiting the block, even if an exception is thrown.
-   - The `close()` method executes a strict lifecycle guarantee:
-     - It prevents any further forks (subsequent calls to `scope.fork()` will throw `IllegalStateException`).
-     - It initiates cooperative cancellation by calling `Thread.interrupt()` on all active virtual threads in the flock that have not finished.
-     - It blocks the owner thread until all threads in the flock have completely terminated.
-     - If the owner thread is interrupted while waiting in `close()`, it continues to block until all child threads have exited, throwing a `StructureViolationException` to warn of out-of-order nested scope closure. This prevents orphan thread leaks.
+1. **Binding (`open()`)**: `StructuredTaskScope.open()` creates a scope. The thread that opens it (the owner) is the only one that can call `join()` or `close()`.
+2. **Spawning Tasks (`fork()`)**: `scope.fork(Callable)` spawns a task on a new virtual thread and returns a `Subtask` handle. A `Subtask` has three states:
+   - `UNAVAILABLE`: Running or not started yet.
+   - `SUCCESS`: Completed successfully. You can call `.get()` to get the result.
+   - `FAILED`: Failed with an error. You can call `.exception()` to get the error.
+   *Rule*: Calling `.get()` or `.exception()` before `scope.join()` returns throws an `IllegalStateException` to prevent race conditions.
+3. **Waiting (`join()`)**: `scope.join()` blocks the parent thread (yielding its carrier thread) until all subtasks finish or the scope is cancelled. If a task fails in a fail-fast scope, the joiner cancels the scope and wakes up the parent thread early.
+4. **Closing (`close()`)**: The `try-with-resources` block automatically calls `scope.close()`. This stops new forks, interrupts all running subtasks, and waits for all threads to fully terminate before letting the parent thread proceed.
 
 ### Key API Methods
 
-* **`StructuredTaskScope.open()`**: Creates an anonymous scope with the default fail-fast policy (`awaitAllSuccessfulOrThrow()`). It uses virtual threads to execute forked tasks.
-* **`scope.fork(Callable<T>)`**: Submits a subtask for concurrent execution. It returns a `Subtask<T>` handle. It throws `IllegalStateException` if the scope has already been closed or joined.
-* **`scope.join()`**: Blocks the owner thread until all subtasks have completed (succeeded or failed), or the scope is canceled. This method can only be called once by the owner thread.
-* **`scope.close()`**: Closes the scope. It shuts down the scope's coordinator (flock) and waits for all outstanding threads to terminate. If the owner thread is interrupted before all threads exit, `close()` blocks until they terminate, throwing a `StructureViolationException` if nested scopes are closed out of order.
-* **`Subtask.get()`**: Returns the completed task result. It throws `IllegalStateException` if called before `join()` or if the subtask did not succeed.
-* **`Subtask.exception()`**: Returns the `Throwable` thrown by the subtask. It throws `IllegalStateException` if called before `join()`.
+* **`StructuredTaskScope.open()`**: Creates a scope with the default fail-fast policy (`awaitAllSuccessfulOrThrow()`). It uses virtual threads to execute forked tasks.
+* **`scope.fork(Callable<T>)`**: Submits a subtask for concurrent execution, returning a `Subtask<T>` handle.
+* **`scope.join()`**: Blocks the owner thread until all subtasks have completed (succeeded or failed), or the scope is canceled.
+* **`scope.close()`**: Closes the scope, interrupts running tasks, and waits for them to stop.
+* **`Subtask.get()`**: Returns the completed task result (throws if called before `join()` or if the subtask failed).
+* **`Subtask.exception()`**: Returns the `Throwable` thrown by the subtask (throws if called before `join()`).
 
 ### Lifecycle of Scopes and Subtasks
 
 ```
 [scope.open()] ──► [scope.fork()] ──► [Joiner.onFork()] ──► [Spawn VThread]
-                          │                                        │
-                    (Scope Canceled)                               ▼
-                          │                            [Run Task Execution]
-                          ▼                                        │
-                   [Skip Thread Start]                             ▼
-                                                       [Joiner.onComplete()]
-                                                                   │
+                           │                                        │
+                     (Scope Canceled)                               ▼
+                           │                            [Run Task Execution]
+                           ▼                                        │
+                    [Skip Thread Start]                             ▼
+                                                        [Joiner.onComplete()]
+                                                                    │
 [scope.join()] ◄───────────────────────────────────────────────────┘
       │
       ├─► Success: Return results / stream
@@ -234,7 +204,7 @@ try (var scope = StructuredTaskScope.open()) {
 
 ## 4. The `Joiner` Interface & Built-in Joiners
 
-The coordination logic of a `StructuredTaskScope` is governed by a `StructuredTaskScope.Joiner`. The `Joiner` interface acts as an event handler that monitors the state changes of forked subtasks and determines when the parent thread should unblock from `scope.join()`.
+A `Joiner` monitors subtasks and decides when the parent thread should wake up from `scope.join()`.
 
 ### The `Joiner` Interface definition
 
@@ -276,9 +246,9 @@ Java provides five built-in factory methods for creating common joiners:
 
 ### Exception Handling Patterns
 
-When a `StructuredTaskScope` fails due to a subtask error, the parent thread's call to `join()` throws a `StructuredTaskScope.FailedException`. The original exception is accessed via `getCause()`.
+When a `StructuredTaskScope` fails, the parent thread's call to `join()` throws a `StructuredTaskScope.FailedException`. The original exception is accessed via `getCause()`.
 
-#### 1. Pattern Matching for Specific Business Exceptions
+#### 1. Pattern Matching for Exceptions
 You can inspect the root cause using the Java pattern matching `switch` syntax:
 
 ```java
@@ -299,7 +269,7 @@ try (var scope = StructuredTaskScope.open()) {
 }
 ```
 
-#### 2. Local Subtask Catch (Graceful Fallback)
+#### 2. Handling Errors Locally
 If an exception from a subtask is not fatal, catch it *inside* the subtask callable. This prevents the scope from shutting down:
 
 ```java
@@ -313,7 +283,7 @@ scope.fork(() -> {
 });
 ```
 
-### Scope Configurations
+### Scope Configuration
 
 You can customize the execution context of a scope using `StructuredTaskScope.open(Joiner, Function<Configuration, Configuration>)`. The `Configuration` builder supports:
 
@@ -343,13 +313,13 @@ try (var scope = StructuredTaskScope.open(
 
 ## 6. Custom Joiners: Implementation Guide
 
-When the built-in joining policies (such as `awaitAllSuccessfulOrThrow` or `awaitAll`) do not fit your domain coordination logic, you can construct custom joining policies by implementing the `StructuredTaskScope.Joiner<T, R>` interface. 
+When the built-in policies do not fit your logic, you can write custom policies by implementing the `StructuredTaskScope.Joiner<T, R>` interface.
 
 The coordination behavior is driven by two main event hooks:
 1. `onFork(Subtask<? extends T> subtask)`: Invoked by the parent thread *before* it spawns the virtual thread for the forked task. If it returns `true`, the scope is canceled immediately and no new threads are spun up.
 2. `onComplete(Subtask<? extends T> subtask)`: Invoked by a subtask virtual thread immediately when it finishes execution (whether successfully, by throwing an exception, or by being canceled). If this method returns `true`, it triggers a cooperative cancellation of all active tasks in the scope and wakes the parent thread waiting on `join()`.
 
-Below are the complete, production-quality implementations of five custom joiners addressing distinct concurrency coordination patterns, each accompanied by a comprehensive architectural and JVM-level breakdown.
+Below are the implementations of five custom joiners addressing distinct coordination patterns.
 
 ---
 
@@ -402,18 +372,11 @@ public class CollectingJoiner<T> implements StructuredTaskScope.Joiner<T, Collec
 }
 ```
 
-#### Detailed Architectural Walkthrough: `CollectingJoiner`
-1. **Thread-Safe Non-Blocking Collections**:
-   - The fields `successes` and `failures` use `ConcurrentLinkedQueue`. Under the hood, this collection employs lock-free Compare-And-Swap (CAS) instructions. This is critical for virtual thread workloads. If we used a synchronized collection (e.g., `Vector` or `Collections.synchronizedList`), the virtual threads would contend for a monitor lock, risking carrier thread pinning when blocked under lock acquisition.
-2. **Subtask State Evaluation**:
-   - Inside `onComplete()`, the `subtask.state()` is evaluated. 
-   - `SUCCESS`: The task completed normally. Calling `subtask.get()` is guaranteed to return the computed value without blocking or throwing.
-   - `FAILED`: The task threw an exception. Calling `subtask.exception()` retrieves the thrown `Throwable` without blocking.
-   - `UNAVAILABLE`: The task was canceled before it was scheduled to run or did not execute.
-3. **No-Cancellation Contract**:
-   - The method returns `false` unconditionally. This signals the `StructuredTaskScope` manager that the parent thread should continue blocking on `join()` and sibling threads should keep running, ensuring a full collection of the batch.
-4. **Immutability of Results**:
-   - The `result()` method returns a defensive copy of the collections using `List.copyOf()`, preventing downstream modifications from mutating the internally collected state.
+##### How `CollectingJoiner` Works
+1. **Thread-Safe Collections**: Uses `ConcurrentLinkedQueue` which uses lock-free Compare-And-Swap (CAS) operations. This avoids monitor locks and prevents carrier thread pinning.
+2. **Subtask State Evaluation**: Reads the state of each subtask to safely collect results or exceptions.
+3. **No-Cancellation Contract**: Returns `false` in `onComplete()` to keep all tasks running.
+4. **Defensive Copying**: The `result()` method returns a defensive copy of the collections using `List.copyOf()`, preventing downstream modifications.
 
 ---
 
@@ -476,17 +439,10 @@ public class QuorumJoiner<T> implements StructuredTaskScope.Joiner<T, Boolean> {
 }
 ```
 
-#### Detailed Architectural Walkthrough: `QuorumJoiner`
-1. **Low-Level Hardware Atomic Operations**:
-   - `successCount` and `totalCount` are instances of `AtomicInteger`. They rely on volatile hardware atomic operations (e.g., x86 instruction `LOCK XADD` or Load-Linked/Store-Conditional on ARM) to guarantee thread safety. This avoids blocking carrier threads while multiple concurrent subtask virtual threads update counts concurrently.
-2. **Early Cancellation Flow**:
-   - The moment a subtask completes, `onComplete()` is executed. If it succeeds, `successCount.incrementAndGet()` updates the counter.
-   - When `successCount` reaches `requiredSuccesses`, `quorumReached` is set to `true`, and the method returns `true`.
-   - Returning `true` causes the JVM's `StructuredTaskScopeImpl` to set the scope's state to canceled and invoke `Thread.interrupt()` on all active virtual threads in the scope's flock.
-3. **Yielding and Rescheduling**:
-   - Canceling the scope immediately wakes the parent thread blocked in `scope.join()`. The parent thread returns from `join()` and can retrieve the outcome via `result()`.
-4. **Consensus Exception Handling**:
-   - If the scope finishes joining (i.e., all tasks complete) but `quorumReached` is still false, `exception()` returns a `RuntimeException` detailing the consensus failure.
+##### How `QuorumJoiner` Works
+1. **Atomic Counters**: Uses `AtomicInteger` for thread-safe counting without locking carrier threads.
+2. **Early Cancellation**: Returns `true` from `onComplete()` when the quorum is reached. This cancels sibling tasks and wakes the parent thread early.
+3. **Consensus Exception**: If the scope finishes joining but the quorum is not met, `exception()` returns a consensus failure exception.
 
 ---
 
@@ -555,14 +511,10 @@ public class AdaptiveJoiner<T> implements StructuredTaskScope.Joiner<T, Collecti
 }
 ```
 
-#### Detailed Architectural Walkthrough: `AdaptiveJoiner`
-1. **Warmup Window Guard (`minSampleSize`)**:
-   - In any statistical check, early failures can distort the rate (e.g., if the first task fails, the failure rate is 100%). The `minSampleSize` check prevents premature circuit breaking, ensuring a minimum number of tasks are evaluated first.
-2. **Dynamic Flow Interruption**:
-   - The joiner inspects the aggregate failure rate on each task completion. If the threshold is crossed, the circuit breaks (`circuitBroken = true`).
-   - Sibling tasks are aborted via thread interrupts, saving CPU processing cycles, network resources, and database handles.
-3. **State Querying**:
-   - The parent thread checks if the circuit was broken via `exception()`. This allows frameworks to easily map the failure to a HTTP `503 Service Unavailable` status code or trigger fallback policies.
+##### How `AdaptiveJoiner` Works
+1. **Warmup Window**: `minSampleSize` prevents early cancellation from a single initial failure.
+2. **Dynamic Interruption**: Cancels sibling tasks when the failure rate is too high, saving resources.
+3. **State Querying**: Exposes circuit status via `exception()`, allowing systems to map failures to HTTP codes or trigger fallbacks.
 
 ---
 
@@ -635,14 +587,10 @@ public class RateLimitedJoiner<T> implements StructuredTaskScope.Joiner<T, List<
 }
 ```
 
-#### Detailed Architectural Walkthrough: `RateLimitedJoiner`
-1. **Throttling at the Fork Boundary**:
-   - Unlike standard executors that enqueue submitted tasks in a heap queue, `StructuredTaskScope` invokes `onFork()` synchronously during `scope.fork()`.
-   - By calling `semaphore.acquire()` inside `onFork()`, we block the *parent* thread from spawning more subtasks if the limit is reached.
-2. **Virtual Thread Blocking Efficiency**:
-   - If the parent thread is a virtual thread, blocking on `semaphore.acquire()` does not block a physical operating system thread. Instead, the virtual thread is parked, yielding its carrier thread to do other work, and is scheduled again once a permit is released.
-3. **Ensuring Permit Release**:
-   - The `onComplete()` block wraps the permit release in a `finally` block. This guarantees that regardless of whether the subtask succeeds, fails, or is canceled, the semaphore permit is released, preventing resource leakage.
+##### How `RateLimitedJoiner` Works
+1. **Throttling**: `semaphore.acquire()` inside `onFork()` blocks the parent thread if the limit is reached.
+2. **VThread Efficiency**: If the parent thread is virtual, blocking just parks it, yielding its carrier thread to run other work.
+3. **Permit Release**: The `onComplete()` block wraps the permit release in a `finally` block to prevent resource leakage.
 
 ---
 
@@ -705,13 +653,10 @@ public class ConditionalJoiner<T> implements StructuredTaskScope.Joiner<T, List<
 }
 ```
 
-#### Detailed Architectural Walkthrough: `ConditionalJoiner`
-1. **Dynamic Preconditions**:
-   - The condition is evaluated right before the subtask thread starts. This is useful for circuit breaking based on system-wide metrics (e.g., "stop processing if heap usage exceeds 90%").
-2. **Volatile Memory Visibility**:
-   - The `conditionFailed` field is marked `volatile`. This ensures that changes made by the parent thread in `onFork()` are immediately visible to any other threads reading the status or running `exception()` checks.
-3. **Clean Abort**:
-   - If the condition is false, `onFork()` returns `true`. The scope transitions to a canceled state, canceling all currently running subtasks.
+##### How `ConditionalJoiner` Works
+1. **Dynamic Preconditions**: The condition is evaluated right before the subtask thread starts (e.g., check if heap usage is under 90%).
+2. **Volatile Visibility**: Uses a `volatile` flag to ensure all threads see the health check failure instantly.
+3. **Clean Abort**: If the condition is false, `onFork()` returns `true`, cancelling the scope and active subtasks.
 
 ---
 
@@ -734,17 +679,15 @@ Read subtaskResult (sees "Done")
 
 #### JVM Implementation of Happens-Before in StructuredTaskScope
 
-Under the hood, `StructuredTaskScope` relies on the JDK-internal class `ThreadFlock` to manage virtual thread collections. The happens-before guarantees are implemented using memory barriers and internal synchronization mechanisms:
+The happens-before guarantees are implemented using memory barriers and internal synchronization mechanisms:
 
 1. **The `fork` Barrier**:
-   - When you call `scope.fork()`, the owner thread writes to the subtask state (setting the task to `NEW` or `RUNNING`) and enqueues the execution runner.
    - At the JVM level, before launching the subtask virtual thread, the owner thread performs a write operation containing a volatile memory fence or a synchronized monitor write.
-   - According to JMM happens-before rules, a write to a volatile/synchronized variable *happens-before* every subsequent read. When the newly spawned virtual thread starts, its initial state reading acts as a memory read barrier. This invalidates its processor core's L1/L2 caches and forces a reload from the shared L3/main memory, ensuring it sees all modifications (such as local database parameters or request contexts) made by the owner thread prior to the `fork()` call.
+   - When the newly spawned virtual thread starts, its initial state reading acts as a memory read barrier. This invalidates its processor core's L1/L2 caches and forces a reload from the shared L3/main memory, ensuring it sees all modifications made by the owner thread prior to the `fork()` call.
 
 2. **The `join` Barrier**:
    - When a subtask completes, it updates its state to `SUCCESS` or `FAILED` via a volatile or CAS write operation, then signals the scope flock.
-   - The owner thread waiting in `scope.join()` blocks on a synchronization monitor or condition queue.
-   - When the subtask finishes and wakes the owner thread, the owner thread acquires the synchronization lock or reads the volatile state of the completed subtask. This acquisition acts as a memory read barrier, flushing the owner thread core's invalidation queues and loading the final output variables written by the subtask thread, ensuring thread safety without explicit user-level locks.
+   - When the subtask finishes and wakes the owner thread, the owner thread acquires the synchronization lock or reads the volatile state of the completed subtask. This acquisition acts as a memory read barrier, flushing the owner thread core's invalidation queues and loading the final output variables written by the subtask thread.
 
 ### Nested Scopes
 
@@ -759,9 +702,7 @@ Level 1: Document Processing Scope
          └── Level 3: Word Count Check (Subtask)
 ```
 
-If the parent scope is canceled, cancellation propagates recursively to the nested scopes.
-
-This ensures that no orphan tasks continue running in the background when the main task flow has already failed. This cooperative cancellation propagates down the entire thread containment hierarchy.
+If the parent scope is canceled, cancellation propagates recursively to the nested scopes. This ensures that no orphan tasks continue running in the background when the main task flow has already failed.
 
 #### Nested Scopes Code Example
 
@@ -827,23 +768,17 @@ public class DocumentProcessor {
 }
 ```
 
-##### Code walk: Nesting Task Hierarchies
-1. **Level 1 Scope Setup**:
-   - In `processDocument()`, the primary thread opens the parent scope (`gatherScope`) and forks tasks to fetch the document header and body concurrently.
-2. **Parent Coordination**:
-   - The call `gatherScope.join()` blocks the parent thread until both fetch tasks complete. The results are gathered via `headerTask.get()` and `bodyTask.get()`.
-3. **Level 2 Nested Scope Setup**:
-   - The parent thread then passes these results to `analyzeContent()`, which opens a nested child scope (`analysisScope`).
-   - The child scope forks sentiment analysis and word count tasks concurrently.
-4. **Cancellation Cascades**:
-   - If `gatherScope` is canceled (e.g., due to a timeout), the cancellation signals cascade down, interrupting all active child threads in `analysisScope` to ensure clean resource recovery.
-```
+##### How Nesting Task Hierarchies Work
+1. **Level 1 Scope Setup**: In `processDocument()`, the primary thread opens the parent scope (`gatherScope`) and forks tasks to fetch the document header and body concurrently.
+2. **Parent Coordination**: The call `gatherScope.join()` blocks the parent thread until both fetch tasks complete. The results are gathered via `headerTask.get()` and `bodyTask.get()`.
+3. **Level 2 Nested Scope Setup**: The parent thread then passes these results to `analyzeContent()`, which opens a nested child scope (`analysisScope`). The child scope forks sentiment analysis and word count tasks concurrently.
+4. **Cancellation Cascades**: If `gatherScope` is canceled (e.g., due to a timeout), the cancellation signals cascade down, interrupting all active child threads in `analysisScope` to ensure clean resource recovery.
 
 ---
 
 ## 8. Observability & Hierarchical Thread Dumps
 
-Unlike traditional executors, `StructuredTaskScope` maintains a clear container grouping of its threads. This is visible via structured JSON thread dumps.
+Structured scopes group their threads in containers, making them easy to see in JSON thread dumps.
 
 ### Programmatic Thread Dump Generation
 
@@ -925,12 +860,11 @@ The resulting JSON file structures threads into containers matching your scopes:
 ```
 *Observe how `doc-proc-1` is explicitly grouped inside the container `doc-gathering-scope`, referencing `owner: "1"` (the main thread).*
 
-
 ---
 
-## 9. Beginner-Friendly Visualization: The Family Vacation Analogy
+## 9. Office Analogy: The Family Vacation
 
-To understand structured concurrency, it helps to step away from threads, scopes, and joins, and look at a simple family vacation analogy.
+To understand structured concurrency, let us look at a simple family vacation analogy.
 
 Imagine a parent (the Parent Thread) taking their three children—Alice, Bob, and Charlie (the Subtask Threads)—on a family trip to a museum. The parent wants to coordinate three tasks:
 1. Alice buys the admission tickets.
@@ -949,8 +883,6 @@ In modern, structured programming (using `StructuredTaskScope`):
 - The parent connects everyone together with a flexible safety rope (the Scope boundary).
 - **Scenario A (A child gets hurt)**: Alice starts buying tickets but encounters an error (an exception). The moment she fails, the parent is notified immediately. The parent blows a whistle (Cooperative Cancellation), which sends a signal to Bob and Charlie: *"Stop what you are doing, cancel your tasks, and return to the entrance immediately."* Bob and Charlie stop waiting in line, and the family leaves the building together. No time or energy is wasted.
 - **Scenario B (Clean exit)**: The parent cannot leave the museum without checking that all children are accounted for. The `scope.close()` method acts as the parent checking the headcount at the exit gate. It blocks until every child thread is fully returned, ensuring that no orphan threads are left behind in the system.
-
-Structured concurrency ensures that nested tasks are bound to a strict lifecycle block: subtasks are spawned within a scope, coordinated within that scope, and fully terminated before the scope exits.
 
 ---
 
@@ -1021,15 +953,11 @@ public class ScraperCoordinator {
 }
 ```
 
-### Line-by-Line Logic Walkthrough
-1. **Scope Initialization**:
-   - `try (var scope = new StructuredTaskScope.ShutdownOnFailure())` opens the structured boundary. The `ShutdownOnFailure` joiner policy executes a fail-fast strategy.
-2. **Asynchronous Forking**:
-   - The coordinator forks `contentTask` and `tagsTask` concurrently on separate virtual threads.
-3. **Consensus Synchronization**:
-   - `scope.join()` blocks the main thread. If `contentTask` fails (e.g. for a malicious url), the joiner captures the exception, cancels the running `tagsTask`, and resumes the parent thread.
-4. **Clean Exit Assurance**:
-   - The `scope.close()` method within the try-with-resources statement ensures both virtual threads are fully terminated before the method throws the exception, eliminating resource leaks.
+##### How the Scraper Coordinator Works
+1. **Scope boundary**: `try (var scope = new StructuredTaskScope.ShutdownOnFailure())` opens the scope.
+2. **Concurrent Forking**: Spawns tasks to fetch content and tags concurrently on virtual threads.
+3. **Consensus**: `scope.join()` blocks the main thread. If one task fails, it cancels the other and resumes the parent thread early.
+4. **No Leaks**: `scope.close()` ensures both threads are stopped before throwing the error.
 
 ---
 
@@ -1037,6 +965,7 @@ public class ScraperCoordinator {
 
 Ensure you compile and execute these labs using the preview flags:
 ```powershell
+# Compile and run with preview flags
 javac --enable-preview --release 24 Lab.java
 java --enable-preview Lab
 ```
@@ -1140,22 +1069,10 @@ public class Lab41ProductService {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `Lab41ProductService`
-
-1. **Comparison of Resource Lifetimes**:
-   - In the `fetchUnstructured` method, when `revFuture` fails after 1 second, the main thread is still blocked at `prodFuture.get()`. This is because standard futures resolve sequentially on the stack. The main thread has no mechanism to know that a sibling thread failed, so it continues to wait for the 5-second task.
-   - In contrast, in the `fetchStructured` method, both tasks are registered within the `StructuredTaskScope`. As soon as `revTask` fails with an exception at $t = 1\text{s}$, the scope's coordination logic intercepts this and triggers cooperative cancellation.
-
-2. **Interruption Mechanics of Sibling Tasks**:
-   - When the scope initiates cancellation at $t = 1\text{s}$, it invokes `Thread.interrupt()` on the virtual thread running the `prodTask` lambda.
-   - Inside the `prodTask` code block (lines 940–948), the virtual thread is currently blocked inside `Thread.sleep(Duration.ofSeconds(5))`.
-   - The JVM interrupts the sleep, causing the thread to wake up early and throw an `InterruptedException`.
-   - The catch block inside `prodTask` intercepts this, prints the cancellation message (`"Structured: Product fetch caught cancellation interrupt!"`), and re-throws the exception, which terminates the virtual thread cleanly.
-
-3. **Latency and Resource Gains**:
-   - Because `prodTask` is aborted early, the parent thread's call to `scope.join()` returns immediately at $t = 1\text{s}$.
-   - The try-with-resources statement executes `scope.close()`, which blocks until both subtask virtual threads are fully terminated, avoiding any thread or resource leaks.
-   - The main thread enters the `FailedException` catch block and exits the method. The elapsed time is printed as approximately **1000ms**, showing a massive latency and CPU saving compared to the **5000ms** of the unstructured executor.
+##### How `Lab41ProductService` Works
+1. **Comparison of Resource Lifetimes**: In the `fetchUnstructured` method, when `revFuture` fails after 1 second, the main thread is still blocked at `prodFuture.get()`. It has no mechanism to know that a sibling thread failed, so it continues to wait for the 5-second task. In `fetchStructured`, both tasks are registered within the `StructuredTaskScope`. As soon as `revTask` fails with an exception at $t = 1\text{s}$, the scope's coordination logic intercepts this and triggers cooperative cancellation.
+2. **Interruption Mechanics of Sibling Tasks**: When the scope initiates cancellation at $t = 1\text{s}$, it invokes `Thread.interrupt()` on the virtual thread running the `prodTask`. The virtual thread is currently blocked inside `Thread.sleep(5000)`. The JVM interrupts the sleep, causing the thread to wake up early and throw an `InterruptedException`.
+3. **Latency and Resource Gains**: Because `prodTask` is aborted early, the parent thread's call to `scope.join()` returns immediately at $t = 1\text{s}$. The try-with-resources statement executes `scope.close()`, which blocks until both subtask virtual threads are fully terminated, avoiding any thread or resource leaks. The total elapsed time printed is approximately **1000ms**, showing a massive latency and CPU saving compared to the **5000ms** of the unstructured executor.
 
 ---
 
@@ -1206,20 +1123,10 @@ public class Lab42BatchValidation {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `Lab42BatchValidation`
-
-1. **Joiner Selection and Stream Return**:
-   - At line 1064, the scope is initialized using `Joiner.allSuccessfulOrThrow()`. This joiner policy requires *all* tasks to succeed; otherwise, it cancels the scope. Upon successful completion of `scope.join()`, it returns a `Stream<Subtask<User>>` containing all results.
-   - Calling `results.map(Subtask::get)` is safe because `allSuccessfulOrThrow` guarantees that all tasks succeeded if `join()` returns normally.
-
-2. **Fail-Fast Trigger and Cancellation**:
-   - The batch list contains a user (id 102) with `isValid = false`.
-   - When the virtual thread executing `validateUser` for user 102 evaluates `if (!u.isValid())` at line 1062, it throws an `IllegalArgumentException`.
-   - The `allSuccessfulOrThrow` joiner intercepts this failure in its completion hook. It sets the scope's state to canceled and interrupts the sibling virtual threads executing validation for users 101 and 103.
-   - The parent thread blocks on `scope.join()` until all threads terminate, and then throws a `StructuredTaskScope.FailedException`.
-
-3. **Exception Propagation**:
-   - The catch block at line 1071 catches the `FailedException`. Calling `e.getCause()` retrieves the original `IllegalArgumentException` thrown by the subtask, printing `"Batch Validation Failed: User 102 has invalid email format!"`.
+##### How `Lab42BatchValidation` Works
+1. **Joiner Selection**: The scope uses `Joiner.allSuccessfulOrThrow()`. This requires *all* tasks to succeed; otherwise, it cancels the scope. Upon successful completion of `scope.join()`, it returns a `Stream<Subtask<User>>` containing all results.
+2. **Fail-Fast Trigger**: The batch list contains a user (id 102) with `isValid = false`. The virtual thread executing `validateUser` for user 102 throws an `IllegalArgumentException`. The joiner intercepts this failure, sets the scope's state to canceled, and interrupts the sibling threads.
+3. **Exception Propagation**: The catch block catches the `FailedException`. Calling `e.getCause()` retrieves the original `IllegalArgumentException` thrown by the subtask, printing the error.
 
 ---
 
@@ -1282,26 +1189,15 @@ public class Lab43Notifications {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `Lab43Notifications`
-
-1. **Wait-All Coordination Strategy**:
-   - At line 1106, the scope is initialized using `Joiner.awaitAll()`. This joiner policy implements a non-fail-fast, cooperative strategy: it blocks the owner thread in `scope.join()` until *all* forked tasks have completed, regardless of whether they succeeded or failed.
-   - Sibling tasks are never canceled or interrupted by the joiner when one of them throws an exception.
-
-2. **Handling Exceptions without Propagation**:
-   - The task running `sendPush` throws a `RuntimeException` at line 1120.
-   - When this failure occurs, the `awaitAll` joiner records the exception internally but does *not* set the scope state to canceled and does *not* interrupt the sibling threads executing `sendSms` and `sendEmail`.
-   - The SMS and Email tasks continue executing, print their success logs, and successfully insert their delivery reports into the `reports` list (which is thread-safe via `CopyOnWriteArrayList`).
-   - When `scope.join()` returns, it does *not* throw a `FailedException` or `ExecutionException`. It returns normally.
-
-3. **Exposing Results and Failures**:
-   - Because `join()` returns successfully, we execute the post-join logic.
-   - The `reports` list contains the successful SMS and Email deliveries. The failure of the Push channel did not affect the other notifications, which is the desired behavior for multi-channel broadcasts.
+##### How `Lab43Notifications` Works
+1. **Wait-All Strategy**: The scope uses `Joiner.awaitAll()`. This blocks the owner thread in `scope.join()` until *all* forked tasks have completed, regardless of whether they succeeded or failed. Sibling tasks are never canceled or interrupted when one of them throws an exception.
+2. **Handling Exceptions**: The task running `sendPush` throws a `RuntimeException`. The `awaitAll` joiner records the exception internally but does *not* cancel the scope or interrupt the sibling threads. SMS and Email tasks continue executing normally.
+3. **Exposing Results**: When `scope.join()` returns, it does *not* throw an exception. The `reports` list contains the successful SMS and Email deliveries.
 
 ---
 
 ### Lab 4.4: Custom `QuorumJoiner` Distributed Database
-**Objective**: Implement a write operation across 5 databases using the custom `QuorumJoiner` designed in Section 6. Return success once at least 3 nodes confirm the write.
+**Objective**: Implement a write operation across 5 databases using the custom `QuorumJoiner`. Return success once at least 3 nodes confirm the write.
 
 ```java
 import java.time.Duration;
@@ -1344,22 +1240,10 @@ public class Lab44QuorumWrite {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `Lab44QuorumWrite`
-
-1. **Custom Quorum Integration**:
-   - At line 1149, the scope is opened with a custom `QuorumJoiner<Boolean>(quorumSize)` instance. The `quorumSize` is configured to `3`, representing the minimum database confirmations required to commit the transaction.
-   - The loop forks 5 database write tasks concurrently.
-
-2. **Early Cancellation on Quorum Achievement**:
-   - As each task completes, the `onComplete(Subtask)` event handler inside the custom `QuorumJoiner` is invoked.
-   - When the first three tasks complete successfully, the atomic `successCount` counter reaches `3`.
-   - The joiner sets `quorumReached = true` and returns `true` from `onComplete()`.
-   - The `StructuredTaskScope` manager intercepts the `true` return and initiates cooperative cancellation, sending interrupts to the remaining two slow or running virtual threads.
-   - The parent thread blocked on `scope.join()` is immediately woken up, and `join()` returns.
-
-3. **Consensus Outcome Handling**:
-   - Since `quorumReached` is `true`, calling `scope.join()` returns the boolean result of `true`.
-   - If the write processes failed such that three successes were impossible (e.g., more than two database nodes failed), the `onComplete()` method would return `false` for all tasks, and when `join()` completed, the call to retrieve the result would call `exception()`, throwing a `RuntimeException` detailing the quorum consensus failure.
+##### How `Lab44QuorumWrite` Works
+1. **Custom Quorum Integration**: The scope is opened with a custom `QuorumJoiner<Boolean>(quorumSize)` instance. The `quorumSize` is configured to `3`, representing the minimum database confirmations required.
+2. **Early Cancellation**: As each task completes, the `onComplete(Subtask)` event handler is invoked. When the first three tasks complete successfully, the atomic `successCount` counter reaches `3`. Sibling tasks are canceled, and `scope.join()` returns immediately.
+3. **Consensus Outcome**: Since `quorumReached` is `true`, calling `scope.join()` returns the boolean result of `true`.
 
 ---
 
@@ -1404,27 +1288,14 @@ public class Lab45Timeout {
 }
 ```
 
-##### Line-by-Line Code Walkthrough: `Lab45Timeout`
-
-1. **Timeout Parameter Configuration**:
-   - At line 1240, the `StructuredTaskScope` is configured with a strict timeout parameter of 2 seconds by passing `config -> config.withTimeout(Duration.ofSeconds(2))` as the second argument to `open()`.
-   - The timeout timer starts running the moment the scope is opened.
-
-2. **Forking and Execution Times**:
-   - The method forks two tasks.
-   - `profileTask` takes 1 second, which is within the 2-second timeout. It completes successfully and returns `"AvatarUrl"`.
-   - `statsTask` takes 4 seconds, which exceeds the 2-second timeout limit.
-
-3. **Timeout Interruption and Exception Handling**:
-   - At $t = 2\text{s}$ (exactly 2 seconds after the scope opened), the JVM's timeout scheduler event fires.
-   - The scope manager transitions the scope to the canceled state.
-   - It issues cooperative interrupts to all running subtask virtual threads.
-   - The thread executing `statsTask` (currently sleeping) intercepts the interrupt, terminates early, and throws an `InterruptedException`.
-   - The parent thread blocked on `scope.join()` is unblocked at $t = 2\text{s}$ and throws a `StructuredTaskScope.TimeoutException`.
-   - The main thread enters the `catch (StructuredTaskScope.TimeoutException e)` block at line 1259, printing the timeout warning message.
+##### How `Lab45Timeout` Works
+1. **Timeout Parameter Configuration**: The `StructuredTaskScope` is configured with a strict timeout parameter of 2 seconds by passing `config -> config.withTimeout(Duration.ofSeconds(2))` as the second argument to `open()`.
+2. **Timeout Interruption**: `profileTask` takes 1 second (succeeds), but `statsTask` takes 4 seconds. At $t = 2\text{s}$, the scope manager transitions the scope to the canceled state and issues cooperative interrupts. The sleeping `statsTask` thread is interrupted, throws `InterruptedException`, and terminates.
+3. **Exception Handling**: The parent thread blocked on `scope.join()` is unblocked at $t = 2\text{s}$ and throws a `StructuredTaskScope.TimeoutException`, which is caught in the catch block.
 
 ---
-### Detailed Case Study: Building a High-Throughput Resilient Microservice Gateway
+
+## 12. Case Study: Building a High-Throughput Resilient Microservice Gateway
 
 To see how all these modern abstractions fit together in a production-grade environment, we will study the architecture of a high-throughput **Microservice API Gateway**. 
 
@@ -1433,14 +1304,14 @@ The gateway must handle incoming client requests by aggregating data from severa
 2. **Order History Service**: (Required) Retrieves recent purchase records.
 3. **Product Recommendations**: (Optional) Gathers dynamic product suggestions from three external partners.
 
-#### Resiliency and Performance Constraints:
-- **Core Requirements**: If the user profile or order service fails, the aggregate request must fail immediately to prevent returning corrupted data.
-- **Optional Fallback**: The recommendation subtask is non-critical. If all recommendations fail or time out, the gateway should fall back to a static cached recommendation list rather than failing the client request.
+### Resiliency and Performance Constraints:
+- **Core Requirements**: If the user profile or order service fails, the aggregate request must fail immediately.
+- **Optional Fallback**: The recommendation subtask is non-critical. If it fails, the gateway should fall back to a static cached recommendations list rather than failing the client request.
 - **Quorum Execution**: Recommendations are fetched from three separate partner engines. To minimize tail latency, the recommendations subtask should return as soon as **any two partners** return successful suggestions, canceling the remaining slow search.
 - **Backpressure Throttle**: Downstream APIs are protected by a concurrency semaphore.
 - **Context Propagation**: A tracing ID and authenticated user principal are propagated from the HTTP request thread to all spawned subthreads.
 
-#### Complete Compile-Ready Implementation (`GatewayAggregator.java`)
+### Complete Compile-Ready Implementation (`GatewayAggregator.java`)
 
 Here is the complete gateway coordinator implementation utilizing nested scopes, scoped values, custom joiners, and semaphores:
 
@@ -1492,7 +1363,7 @@ public class GatewayAggregator {
                            }
                        }
                    });
-    }
+     }
 
     /**
      * Aggregates downstream services using structured concurrency.
@@ -1664,7 +1535,7 @@ public class GatewayAggregator {
         System.out.println("RECOMMENDED  :");
         r.recommendations().forEach(rec -> System.out.printf("  - %s (Score: %.2f) [%s]%n", rec.name(), rec.score(), rec.itemId()));
         System.out.println("=====================================================\n");
-    }
+     }
 
     /**
      * Custom Quorum Joiner that returns results as soon as 'quorum' tasks complete successfully.
@@ -1720,39 +1591,16 @@ public class GatewayAggregator {
 }
 ```
 
-#### Detailed Architectural Walkthrough: `GatewayAggregator`
-
-1. **Outer Scope Isolation and Fail-Fast Core Domains**:
-   - Inside `aggregateRequest(userId)`, we instantiate the root coordinator scope: `try (var outerScope = StructuredTaskScope.open())`.
-   - We fork tasks to fetch the User Profile and Order History. These tasks are critical to the request. If either task throws an exception (such as database query timeout or microservice offline error), the default `FailedException` propagates to the parent thread at `outerScope.join()`, triggering cooperative cancellation of any remaining task running under this scope.
-
-2. **The Dynamic Fallback Sandbox**:
-   - The third task, which retrieves product suggestions, is optional.
-   - To prevent its failure from aborting the entire request, the task wrapper is enclosed in a local `try-catch` block inside the forked lambda expression.
-   - If the recommendations method `fetchRecommendationsWithQuorum()` throws a `FailedException` or `IOException`, the catch block intercepts the error, logs it as a warning, and executes `fetchFallbackRecommendations()`, returning a static recommendations list to the scope. The outer scope completed successfully because the subtask lambda returned a fallback list rather than letting the exception escape.
-
-3. **Nested Scope and Quorum Coordination**:
-   - Inside `fetchRecommendationsWithQuorum()`, the recommendations task opens an inner child scope: `try (var innerScope = StructuredTaskScope.open(new QuorumJoiner<>(quorumSize)))`.
-   - Sibling tasks are spawned concurrently to fetch recommendations from Partners A, B, and C.
-   - We use a custom `QuorumJoiner` initialized to a quorum size of `2`.
-   - As soon as **any two partners** complete successfully (e.g., Partner A and Partner B finish), the `QuorumJoiner.onComplete()` method returns `true`.
-   - The inner scope coordinator immediately cancels the remaining execution (interrupting Partner C's virtual thread).
-   - The parent thread blocked on `innerScope.join()` resumes, aggregates the lists, and returns the result, bypassing Partner C's tail latency.
-
-4. **Cooperative Cancellation Cascades**:
-   - If the outer scope is canceled or timed out, the cancellation signal cascades down.
-   - The JVM interrupts the coordinator thread executing the child scope.
-   - The interrupted coordinator wakes up from `innerScope.join()`, catches the interrupt, and propagates the cancellation signal to all three partner virtual threads, ensuring that the entire microservice tree is terminated cleanly.
-
-5. **Context Inheritance across Scope Boundaries**:
-   - The incoming request thread binds `TRACE_ID` using `ScopedValue.where()`.
-   - When the outer scope calls `fork()`, the virtual threads executing `fetchProfile()` and `fetchOrders()` inherit this context dynamically.
-   - Inside `fetchProfile()`, calling `TRACE_ID.get()` correctly resolves `"REQ-ID-999221"`.
-   - When `fetchRecommendationsWithQuorum()` forks the partner subtasks, the child virtual threads inherit the trace context recursively, allowing unified logs tracing throughout the entire aggregation transaction.
+##### How `GatewayAggregator` Works
+1. **Outer Scope Isolation**: Inside `aggregateRequest(userId)`, we instantiate the root scope: `try (var outerScope = StructuredTaskScope.open())`. We fork User Profile and Order History tasks. If either fails, `FailedException` propagates to the parent thread at `outerScope.join()`, triggering cooperative cancellation of remaining tasks.
+2. **Fallback Sandbox**: The third task (fetching suggestions) is optional. We enclose it in a local `try-catch` block inside the forked lambda. If `fetchRecommendationsWithQuorum()` fails, we catch it and run `fetchFallbackRecommendations()`, returning a static recommendations list.
+3. **Nested Scope and Quorum**: Inside `fetchRecommendationsWithQuorum()`, we open an inner child scope: `try (var innerScope = StructuredTaskScope.open(new QuorumJoiner<>(quorumSize)))`. We fork requests to Partners A, B, and C. Using our custom `QuorumJoiner` set to `2`, the moment any two partners complete successfully, `onComplete()` returns `true`. The inner scope cancels the third task (Partner C), avoiding its tail latency.
+4. **Cascading Cancellation**: If the outer scope is canceled or times out, the cancellation signal cascades down. The JVM interrupts the coordinator thread executing the child scope, which wakes up from `innerScope.join()` and propagates the cancellation signal to all partner virtual threads.
+5. **Context Inheritance**: Subtasks inherit Scoped Values (`TRACE_ID`) from the parent thread. Calling `TRACE_ID.get()` inside virtual threads resolves correctly, allowing unified logs tracing.
 
 ---
 
-## 10. Common Pitfalls & Knowledge Check
+## 13. Common Pitfalls & Knowledge Check
 
 ### Common Pitfalls
 
@@ -1804,3 +1652,5 @@ Always wrap scopes in try-with-resources. Leaving a scope open without calling `
 
 #### Answer Key
 1: C | 2: B | 3: C | 4: D
+
+---
