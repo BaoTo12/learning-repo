@@ -1,21 +1,27 @@
-# Understanding Treeifying of HashMaps
+# Understanding Treeifying of HashMaps
 
-In the previous , we have seen how the ConcurrentHashMap offers better performance than Collections.synchronizedMap() with a simple test. Here we will understand one of the important performance enhancements done in Java8 HashMap and ConcurrentHashMap. This enhancement that we are talking about is NOT really related to thread safety but about reducing the complexity of searching for a key in a particular bin — *The TreeNodes*.
+In the previous modules, we compared the write performance of `Collections.synchronizedMap()` and `ConcurrentHashMap` under high thread contention. In this module, we will explore an important performance optimization introduced in Java 8 for both `HashMap` and `ConcurrentHashMap`. 
 
-_Note: For you to understand this article, you are required to know how HashMap’s put() method works._
+Unlike thread-safety mechanisms, this optimization focuses on reducing the algorithmic complexity of looking up keys within a highly congested bin (bucket) using **`TreeNodes`**.
 
-The concept here is very simple. Whenever two or more keys land in the same bin, they will get added to the end of the list that the bin represents. To simulate this scenario let’s write a class that has poor hashcode implementation.
+> [!NOTE]
+> **Prerequisite**
+> To fully understand this module, you should be familiar with the internal workings of a standard `HashMap` (specifically separate chaining and how the `put()` method resolves hash collisions).
 
-\*Note: We are using the words ***bin*** and ***bucket*** interchangeably. Both are the same and represent the index in the underlying table array.\*
+---
+
+## The Problem: High Hash Collisions
+
+Whenever two or more distinct keys produce the same hash code (or map to the same bucket index), they are added to a singly linked list representing that bucket. 
+
+To simulate this scenario and understand the performance impact, let's write a custom class with a deliberately poor hash function that violates the uniform distribution principle:
 
 ```java
 public final class Student {
 
-
     private final int stdId;
     private final String stdName;
     private final int deptNo;
-
 
     public Student(int stdId, String stdName, int deptNo) {
         this.stdId = stdId;
@@ -23,15 +29,13 @@ public final class Student {
         this.deptNo = deptNo;
     }
 
-
     // Getters
-
 
     @Override
     public int hashCode() {
-        return 4; // Poor Hashcode implementation
+        // Poor Hashcode implementation: always returns a constant
+        return 4; 
     }
-
 
     @Override
     public boolean equals(Object o) {
@@ -39,17 +43,19 @@ public final class Student {
         if (o == null || getClass() != o.getClass()) return false;
         Student student = (Student) o;
         return stdId == student.stdId &&
-                deptNo == student.deptNo &&
-                stdName.equals(student.stdName);
+               deptNo == student.deptNo &&
+               stdName.equals(student.stdName);
     }
 }
 ```
 
-hosted with ❤ by 
+*Figure 17.5.1: Student class with a deliberately poor hashCode() implementation*
 
-Illustration 17.5.1. Student.java class with Poor hashcode() implementation
+---
 
-You can see this class has a poor hashcode function, in the sense that for every Student object the hashcode returns the same value. If we add the Student objects having the same hashcode to the HashMap as keys, all the entries will land in the same bucket. For example, let’s assume we have added 5 student objects as below. Now all these objects will end up in the same bucket.
+## Simulating Collision Chains
+
+If we add several `Student` objects to a `HashMap` as keys, their identical hash codes will cause all entries to land in the exact same bucket. Let's trace this with 5 insertions:
 
 ```java
 Map<Student, String> studentMap = new HashMap<>();
@@ -60,65 +66,103 @@ studentMap.put(new Student(104, "STD04", 1004), "STD04");
 studentMap.put(new Student(105, "STD05", 1005), "STD05");
 ```
 
-Let’s calculate in which bucket they will land. So we know how Java’s HashMap calculates the bucket index: **i = (n - 1) & hash**.
+Let's calculate the target bucket index $i$ using the standard map indexing formula: 
 
-**i = (n - 1) & hash**: **n** is 16 as the initial table size is 16. And the hash is 4 because every Student object will return the same hashcode value 4.
+$$\text{index} = (n - 1) \ \& \ \text{hash}$$
 
-**n - 1** = 16 - 1 => 15 (1111 in binary)
-**hash** = 4 ( 0100 in binary)
-**(n -  1) & hash** = 15 & 4 = 1111 & 0100 = 0100
-i = 0100 => 4
+Where $n$ is the table capacity (default is 16) and the hash is 4:
 
-So the result value will always be 4. This is the case for every Student object. So all the entries will end up in the same bucket 4. This is depicted as below.
-![alt text](../images/image18.png)
-Now, what is the problem with this?
+```text
+n = 16
+n - 1 = 15 (1111 in binary)
+hash = 4   (0100 in binary)
 
-As you can notice, the get() operation sucks due to the bad hashcode. The worst-case complexity of theget() operation goes up to **O(N)** where **N **is the size of the bin, because it has to scan through each node in that bin, and if none of the nodes are equal to the key it has to add the new node at the end of the list.
-
-Not only the get operation but all the subsequent put operations take the time complexity of **O(N)**. As we keep on adding the new nodes this gets even worse.
-
-Why do we need to worry about this? Well, we use hash-based collections to get the insert, remove, update and read to be in constant time complexity. That is **O(1)**.
-
-So who is the culprit here: Java’s HashMap or the Programmer who has written the client code?
-
-Well, it is the programmer that has messed up the hashcode implementation.  clearly specifies that we should follow hashcode and equals contract.
-
-Though it is the programmer's responsibility to provide good hashcode implementation, Java 8 is very kind enough to optimize this. What it does is convert that singly linked list to a *Balanced Binary Search Tree*. This operation is known as ***Treeifying***. This conversion happens only when the length of the bin goes beyond a threshold that has been set. Now, what is that threshold? You can look at the source code to find out. But here it is.
-
-```java
-static final int ***TREEIFY_THRESHOLD**** *= 8;
+index = 15 & 4 
+      = 1111 & 0100 
+      = 0100 (4 in decimal)
 ```
 
-So if the length of the bin goes beyond or equal to 8, the list will be converted to *Balanced Binary Search Tree*. Now the advantage of treeifying is that all the operations get, put, remove, update will now be done in **O(Log N)** complexity, where **N** is the size of the bin.
-![alt text](../images/image19.png)
-_Note: The treeifying enhancement is there from Java 8 onwards._
+Because every key returns a hash code of 4, every single entry lands in **bucket 4**, forming a long singly linked list chain at index 4:
 
-Can we actually see that the bin is treeified?
+![Linked List Collision Chain](../images/image18.png)
 
-Yes, we can definitely see it. We know that each entry is an object of type Node<Key, Value>. But this is the only case with the bin representing the single linked list. But after it is treeified, every node in that bin is an object of type TreeNode<Key, Value>. So, one way to check whether the bin is treeified or not is just to debug in the IDE and check the entry object is of type TreeNode or not. Or the other way is to just print the class name of each entry on the console. The below code snippet illustrates this.
+*Figure 17.5.2: Collision chain forming a singly linked list at a single bucket index*
+
+### The Impact of Long Collision Chains
+
+When many keys map to the same bucket, the performance of the map degrades significantly:
+- **Search Complexity ($O(n)$)**: The time complexity of `get()` degrades from the ideal constant time $O(1)$ to linear time **$O(n)$** (where $n$ is the number of nodes in that specific bin). The thread must traverse the list node-by-node, executing `.equals()` on each key.
+- **Insertion/Update Complexity ($O(n)$)**: Every `put()` operation must traverse the entire list to check if the key already exists before appending a new node, which also takes **$O(n)$** time.
+- **Defeating the Purpose**: This completely defeats the purpose of using a hash-based collection, which is designed to provide constant-time $O(1)$ operations for reads, writes, and deletes.
+
+While programmers are responsible for implementing high-quality hash functions, Java 8 provides a safeguard to handle this scenario gracefully.
+
+---
+
+## The Solution: Treeifying Bins
+
+To prevent linear search bottlenecks, Java 8 introduces **Treeification**. When a collision chain grows beyond a specific threshold, the map automatically converts the singly linked list into a **Balanced Binary Search Tree (Red-Black Tree)**. 
+
+Once treeified, the search, insertion, and deletion complexity inside that bucket drops from $O(n)$ to **$O(\log n)$**, providing predictable performance even under extreme collision scenarios.
+
+![Treeified Bin Structure](../images/image19.png)
+
+*Figure 17.5.3: Collision chain converted into a balanced binary search tree (Red-Black Tree)*
+
+---
+
+## The Three Treeification Constants
+
+To balance performance and memory, the JDK defines three critical constants that govern this transition:
+
+1.  **`TREEIFY_THRESHOLD` (8)**: The maximum number of linked nodes allowed in a single bin. If an insertion pushes the bin length to 8, the map attempts to convert the list into a tree.
+2.  **`UNTREEIFY_THRESHOLD` (6)**: During removal or resizing operations, if the number of elements in a treeified bin falls to 6 or fewer, the map converts the Red-Black Tree back into a simple singly linked list to save memory.
+3.  **`MIN_TREEIFY_CAPACITY` (64)**: The minimum overall table capacity required before treeification is allowed. If a bin reaches 8 elements but the total table size is less than 64, the map will **resize the table** (doubling its capacity) instead of treeifying. Resizing redistributes keys and is often a better way to resolve collisions in small tables.
 
 ```java
-public static void main(String[] args) {
-    Map<Student, String> studentMap = new HashMap<>();
-    studentMap.put(new Student(103, "STD03", 1003), "STD03");
-    studentMap.put(new Student(102, "STD02", 1002), "STD02");
-    studentMap.put(new Student(101, "STD01", 1001), "STD01");
-    studentMap.put(new Student(104, "STD04", 1004), "STD04");
-    studentMap.put(new Student(105, "STD05", 1005), "STD05");
-    studentMap.put(new Student(108, "STD08", 1008), "STD08");
-    studentMap.put(new Student(106, "STD06", 1006), "STD06");
-    studentMap.put(new Student(107, "STD07", 1007), "STD07");
-    studentMap.put(new Student(110, "STD10", 1010), "STD10");
-    studentMap.put(new Student(109, "STD09", 1009), "STD09");
-    studentMap.put(new Student(111, "STD11", 1011), "STD11");
+static final int TREEIFY_THRESHOLD = 8;
+static final int UNTREEIFY_THRESHOLD = 6;
+static final int MIN_TREEIFY_CAPACITY = 64;
+```
 
-    studentMap.entrySet().forEach(entry ->
-                System.*out*.println(entry.getClass().getName()));
+---
+
+## Verifying Treeification
+
+We can verify this behavior programmatically. A standard bucket contains nodes of type `java.util.HashMap$Node`. Once treeified, the nodes are replaced by instances of `java.util.HashMap$TreeNode` (which extends `LinkedHashMap.Entry`, which in turn extends `HashMap.Node`).
+
+Let's write a program that inserts 11 colliding keys into a map and prints the underlying class type of each entry:
+
+```java
+import java.util.HashMap;
+import java.util.Map;
+
+public class TreeifyDemo {
+    public static void main(String[] args) {
+        Map<Student, String> studentMap = new HashMap<>();
+        studentMap.put(new Student(103, "STD03", 1003), "STD03");
+        studentMap.put(new Student(102, "STD02", 1002), "STD02");
+        studentMap.put(new Student(101, "STD01", 1001), "STD01");
+        studentMap.put(new Student(104, "STD04", 1004), "STD04");
+        studentMap.put(new Student(105, "STD05", 1005), "STD05");
+        studentMap.put(new Student(108, "STD08", 1008), "STD08");
+        studentMap.put(new Student(106, "STD06", 1006), "STD06");
+        studentMap.put(new Student(107, "STD07", 1007), "STD07");
+        studentMap.put(new Student(110, "STD10", 1010), "STD10");
+        studentMap.put(new Student(109, "STD09", 1009), "STD09");
+        studentMap.put(new Student(111, "STD11", 1011), "STD11");
+
+        studentMap.entrySet().forEach(entry ->
+                System.out.println(entry.getClass().getName())
+        );
+    }
 }
 ```
 
-What I have done is put eleven entries on the map. All eleven will be in the same bucket crossing the TREEIFY_THRESHOLD***,*** thereby converted to *TreeNodes*. Here is the output.
+### Output (With 11 Colliding Nodes)
+Since the total number of colliding nodes (11) exceeds the `TREEIFY_THRESHOLD` (8), the bin is treeified. Each node is represented by a `TreeNode` instance:
 
+```text
 java.util.HashMap$TreeNode
 java.util.HashMap$TreeNode
 java.util.HashMap$TreeNode
@@ -130,21 +174,35 @@ java.util.HashMap$TreeNode
 java.util.HashMap$TreeNode
 java.util.HashMap$TreeNode
 java.util.HashMap$TreeNode
+```
 
-What will be output if we have the nodes less then specified by TREEIFY_THRESHOLD. Well, they are simply Nodes, right? Here is the output when we have lesser nodes than specified by TREEIFY_THRESHOLD.
+### Output (With 5 Colliding Nodes)
+If we only insert 5 colliding nodes (which is below the threshold), the bin remains a simple singly linked list of `Node` instances:
 
+```text
 java.util.HashMap$Node
 java.util.HashMap$Node
 java.util.HashMap$Node
 java.util.HashMap$Node
 java.util.HashMap$Node
+```
 
-That is the story of *Treeifying*. The logic is simple — Converting the LinkedList to *Balanced Binary Search Trees*. But how does it happen in ConcurrentHashMap? Because this operation has to be done in a thread-safe manner. Well, it uses the built-in monitor(The Intrinsic Lock) on the first node itself the same way as specified in the putVal.
+---
+
+## Treeification in ConcurrentHashMap
+
+In `ConcurrentHashMap`, the treeification process is identical, but it must occur in a thread-safe manner. 
+
+If a thread performing a `put()` operation detects that a bin has reached the `TREEIFY_THRESHOLD`, it initiates treeification. The thread acquires the **intrinsic monitor lock (`synchronized`) on the head node of that bin**, ensuring that no other thread can modify, insert, or delete nodes in that bin while the linked list is being converted into a Red-Black Tree.
+
+---
 
 ## Summary
 
-Bad hashcode results in bad performance. The programmer’s should always ensure to write good hash functions to ensure the uniform random distribution of the hashcode in the table.
-
-The Java8’s HashMap transforms the bin from List to *Balanced Binary Search Tree *to make the operations on map efficient.
-
-All the nodes are of type TreeNode once the bin is treeified.
+*   **Hash Collisions**: Occur when multiple keys map to the same bucket index. Poorly written hash functions lead to long collision chains.
+*   **Performance Degradation**: Long collision chains degrade map operations (reads, writes, deletes) from constant time $O(1)$ to linear time $O(n)$ search complexity.
+*   **Treeification**: An optimization introduced in Java 8 that automatically converts a singly linked list in a highly congested bin into a balanced Red-Black Tree.
+*   **Logarithmic Complexity**: Treeification reduces search, insertion, and deletion complexity from $O(n)$ to **$O(\log n)$**, protecting application performance against poor hash code implementations.
+*   **The Threshold (8)**: A bin is treeified only if its size reaches **`TREEIFY_THRESHOLD` (8)** and the overall map capacity is at least **64** (`MIN_TREEIFY_CAPACITY`).
+*   **Untreeification (6)**: If the bin size falls to **6** (`UNTREEIFY_THRESHOLD`) due to removals or resizing, it is converted back into a singly linked list to conserve memory.
+*   **Thread Safety**: In `ConcurrentHashMap`, treeification is guarded by acquiring the intrinsic monitor lock (`synchronized`) on the head node of the target bin.

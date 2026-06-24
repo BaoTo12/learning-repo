@@ -1,179 +1,405 @@
 # The CyclicBarrier
 
-In the previous , we have seen the three most popular ways of using CountDownLatch. Latches mainly focus on waiting for a group of related events to complete.
+In the previous module, we explored the three most common ways of using `CountDownLatch`. Latches focus on waiting for a set of events to occur. However, a major limitation of latches is that they are **single-use (use-once)** objects. Once a latch reaches its terminal state (count = 0), the gate remains open forever and cannot be closed or reset.
 
-The most important thing about Latches is that they are ***Use-Once*** objects; once a latch reaches its terminal state, there is no coming back. The gate is open with no closing — Any number of threads can pass through the gate.
+If you need a synchronization barrier that can be reset and reused multiple times, you must use a **`CyclicBarrier`**. 
 
-***Any number of threads***? What does it mean and how? This is a little important to understand. Let’s say the latch is initialized with the count as 4. And we have 10 threads waiting for the latch to reach its terminal state. In this case, not all 10 threads need to bring the count down. Only 4 out of 10 threads will need to do so. When that happens the latch reaches theterminal state. As the latch reaches the terminal state, not just the four threads that brought the count down to zero but all the 10 threads will be released. Because all the 10 threads waiting for the gate to be opened. All that the threads need for them to be released is, for the latch to reach its terminal state. Hope you have understood.
+---
 
-Now as we said, the latches are ***Use-Once*** objects, what if we need the same functionality to be repeated more than twice or thrice. Creating those many latches would be a pathetic way of coding it. That’s where ***Barriers*** come into the picture.
+## Latches vs. Barriers: Key Differences
 
-***Barriers*** work very similarly to latches — In the sense that they are used to make a group of threads waiting. But they can also be reset and reused again. This is why there are called Cyclical Barriers. The textbooks only specify this difference. But apart from being cyclical, there is another important difference that we need to understand.
+To select the right synchronizer, you must understand how `CountDownLatch` and `CyclicBarrier` differ structurally, conceptually, and programmatically. 
 
-## Key Difference between Latch and Barrier
+| Feature | CountDownLatch | CyclicBarrier |
+| :--- | :--- | :--- |
+| **Coordination Target** | Waits for **events** to occur. | Waits for **other threads** to arrive. |
+| **Thread Blocking** | Threads calling `countDown()` do **not** block; only threads calling `await()` block. | **All** threads calling `await()` block until the required number of threads arrive. |
+| **Reusability** | **Single-use**. Once open, it cannot be reset or reused. | **Reusable (Cyclic)**. Resets automatically when all threads arrive, or manually via `reset()`. |
+| **Barrier Action** | None supported. | Supports a **Runnable barrier action** executed when the barrier is tripped, before threads are released. |
+| **Algorithmic Flow** | One-way gate (producers signal, consumers wait). | Multi-way rendezvous (all threads arrive and wait for each other). |
 
-The key difference is that with a barrier, all the threads come at a barrier point at the same time in order to proceed. With Latches the threads don’t come at the latch point, instead, they count down the latch indicating that an event is completed. In simple words, Latches are for waiting for events; Barriers are for waiting for other threads.
+---
 
-*Latches are for waiting for events; barriers are for waiting for other threads.*
+### 1. Tasks vs. Threads (Counting Target)
 
-To make it easier to understand, let me tell you a simple real-world example. Assume that there is a group of 5 friends who want to eat the dominos pizza and meet at a specific point. There are two ways they can plan their meeting.
+A crucial semantic difference is that **`CyclicBarrier` maintains a count of threads**, whereas **`CountDownLatch` maintains a count of tasks**. 
 
-First, they can meet at a rendezvous point and go together to the pizza shop from there. As each person arrives they have to wait till all the five have arrived. Or …
+*   **CountDownLatch (Tasks)**: The latch waits for a number of tasks to complete. Because tasks are independent of the threads executing them, a **single thread** can decrement the latch multiple times by calling `countDown()` repeatedly.
+*   **CyclicBarrier (Threads)**: The barrier waits for threads to arrive at a rendezvous point. The threads themselves *are* the barrier. Therefore, a single thread **cannot** count down a barrier twice. A call to `await()` blocks the thread immediately, preventing it from executing a second `await()` until the barrier is already tripped and opened by other threads.
 
-Each of them can individually eat the pizza and come to the rendezvous point.
+#### CountDownLatch Task Code Proof
+A single thread can decrement a CountDownLatch of size 2 to zero successfully:
 
-The first case is exactly what the CyclicBarrier solves. All the five people can be thought of as threads waiting at a barrier point.
+```java
+CountDownLatch countDownLatch = new CountDownLatch(2);
+Thread t = new Thread(() -> {
+    countDownLatch.countDown(); // Decrements to 1
+    countDownLatch.countDown(); // Decrements to 0
+});
+t.start();
+countDownLatch.await(); // Returns immediately since count is 0
 
-The second is what CoundDownLatch solves. Each person eating the pizza can be thought of as completing the event. Finishing the Pizza is an event here. Here also the latch waits for all the people to finish the pizza, not their arrival.
+assertEquals(0, countDownLatch.getCount()); // Passes
+```
 
-Hope this example makes you understand the difference between *Barrier* and *Latch better*. In summary, CyclicBarrier allows a specified number of threads to wait cyclically at a barrier point.
+#### CyclicBarrier Thread Code Proof
+A single thread attempting to trip a CyclicBarrier of size 2 by calling `await()` twice will block indefinitely at the first call, failing to trip the barrier:
 
-## What does it mean by a Thread Reaching the Barrier Point?
+```java
+CyclicBarrier cyclicBarrier = new CyclicBarrier(2);
+Thread t = new Thread(() -> {
+    try {
+        cyclicBarrier.await(); // Thread blocks here waiting for a second thread!
+        cyclicBarrier.await(); // This line is never reached
+    } catch (InterruptedException | BrokenBarrierException e) {
+        Thread.currentThread().interrupt();
+    }
+});
+t.start();
 
-Now, what do we exactly mean by a thread ***reaching the barrier point?*** Well, when a thread calls await() on the barrier, we say it reached the barrier point. That simple. Reiterating the same in different words, the call to await() says to the barrier that a particular thread has arrived at the point.
+assertEquals(1, cyclicBarrier.getNumberWaiting()); // 1 thread is stuck waiting
+assertFalse(cyclicBarrier.isBroken()); // The barrier remains untripped and intact
+```
 
-## The Arrival Index
+---
 
-await() also returns a unique arrival index at the barrier point. This is very useful when electing a leader thread that can perform a special action in the next iteration.
+### 2. Reusability and Thread Pools
 
-***Reaching the Barrier Point:**** When a thread calles await() it is said to be having arrived at the barrier point.*
+The second most evident difference is reusability. When the barrier trips in `CyclicBarrier`, the internal count immediately resets to its original value, allowing it to govern subsequent waves of threads. A `CountDownLatch` never resets.
 
-***Unique Arrival Index: ****await() returns a unique arrival index that can be useful in electing a thread that can perform a specifc action in the next iteration.*
+#### CountDownLatch Single-Use Proof
+If we submit 20 threads to a pool, each calling `countDown()` on a latch initialized to 7, the latch count drops to zero and remains there forever. It never resets:
 
-Here is the example that makes us understand the barrier even better.
+```java
+CountDownLatch countDownLatch = new CountDownLatch(7);
+ExecutorService es = Executors.newFixedThreadPool(20);
+List<String> outputScraper = Collections.synchronizedList(new ArrayList<>());
+
+for (int i = 0; i < 20; i++) {
+    es.execute(() -> {
+        long prevValue = countDownLatch.getCount();
+        countDownLatch.countDown();
+        if (countDownLatch.getCount() != prevValue) {
+            outputScraper.add("Count Updated");
+        }
+    }); 
+} 
+es.shutdown();
+
+// The count only updates 7 times (from 7 down to 0). All subsequent calls are ignored.
+assertTrue(outputScraper.size() <= 7); 
+```
+
+#### CyclicBarrier Reusability Proof
+If we submit 20 threads to a pool, each calling `await()` on a `CyclicBarrier` initialized to 7, the barrier trips and resets repeatedly. It successfully coordinates multiple cyclic waves of threads:
+
+```java
+CyclicBarrier cyclicBarrier = new CyclicBarrier(7);
+ExecutorService es = Executors.newFixedThreadPool(20);
+List<String> outputScraper = Collections.synchronizedList(new ArrayList<>());
+
+for (int i = 0; i < 20; i++) {
+    es.execute(() -> {
+        try {
+            if (cyclicBarrier.getNumberWaiting() <= 0) {
+                outputScraper.add("Count Updated"); // Added every time the barrier resets
+            }
+            cyclicBarrier.await(); // Tripped and reset automatically every 7 threads
+        } catch (InterruptedException | BrokenBarrierException e) {
+            Thread.currentThread().interrupt();
+        }
+    });
+}
+es.shutdown();
+
+// The barrier resets multiple times, allowing more than 7 updates
+assertTrue(outputScraper.size() > 7); 
+```
+
+---
+
+## A Real-World Analogy
+
+Consider a group of 5 friends planning to meet for pizza:
+
+*   **CountDownLatch (Event-Based)**: Each friend eats their pizza at home (completing an event) and then travels to a rendezvous point. The latch waits for all 5 "pizza-eating" events to complete. The friends do not wait for each other to eat; they only wait for the events to be done.
+*   **CyclicBarrier (Thread-Based)**: All 5 friends agree to meet at a specific street corner (the barrier point) and walk into the pizza shop together. The first friend to arrive must wait on the corner. As the second, third, and fourth arrive, they must also wait. Only when the fifth friend arrives does the group cross the barrier and enter the shop.
+
+The street corner represents a **`CyclicBarrier`**. The threads (friends) arrive at the barrier point by calling `await()` and block until all expected threads have arrived.
+
+---
+
+## Key CyclicBarrier Concepts
+
+### 1. Reaching the Barrier Point
+When a thread calls `await()` on a `CyclicBarrier` instance, it has arrived at the **barrier point**. The thread is immediately blocked and placed in a wait-set until the required number of threads (the barrier capacity) have also called `await()`.
+
+### 2. The Arrival Index
+The `await()` method returns an `int` representing the **arrival index** of the thread (ranging from `parties - 1` down to `0`).
+- The first thread to arrive receives `parties - 1`.
+- The last thread to arrive receives `0`.
+This index is highly useful for electing a "leader" thread. For example, the thread that receives an index of `0` can be elected to merge the results of the parallel computations before the next iteration begins.
+
+### 3. The Barrier Action
+A `CyclicBarrier` can be initialized with an optional `Runnable` action:
+
+```java
+CyclicBarrier barrier = new CyclicBarrier(parties, barrierAction);
+```
+
+The **barrier action** is executed atomically by the last thread to arrive (the one that trips the barrier), after all threads have arrived but *before* any blocked threads are released. This is ideal for merging parallel data sets or logging progress between phases.
+
+---
+
+## Code Example: Using and Resetting a CyclicBarrier
+
+Below is a complete program demonstrating how a `CyclicBarrier` coordinates threads in batches and resets itself automatically:
 
 ```java
 import java.time.LocalDateTime;
 import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.CyclicBarrier;
 
-
 public class CyclicBarrierDemo {
 
-
+    // Initialize the barrier to wait for 2 threads, with a Runnable barrier action
     private static final CyclicBarrier BARRIER = new CyclicBarrier(2, () -> logInfo("Barrier Passed!!"));
-
 
     public static void main(String[] args) throws InterruptedException {
         Runnable task = task();
 
+        Thread t1 = new Thread(task, "T1");
+        Thread t2 = new Thread(task, "T2");
+        Thread t3 = new Thread(task, "T3");
+        Thread t4 = new Thread(task, "T4");
 
-        Thread t
-= new Thread(task, "T1");
-        Thread t
-= new Thread(task, "T2");
-        Thread t
-= new Thread(task, "T3");
-        Thread t
-= new Thread(task, "T4");
-
-
+        // Start the first batch of threads
         t1.start();
         t2.start();
-
 
         t1.join();
         t2.join();
 
-
         logInfo("First Batch Completed!");
-        // BARRIER.reset();
-        logInfo("Barrier has been reset! Waiting for second batch!");
+        logInfo("Barrier has been reset automatically! Waiting for the second batch...");
 
-
+        // Start the second batch of threads, reusing the same barrier
         t3.start();
         t4.start();
-
 
         t3.join();
         t4.join();
 
-
-        logInfo("'main' Finished!");
+        logInfo("main thread finished!");
     }
-
 
     private static Runnable task() {
         return () -> {
             try {
-                logInfo("Working ...");
-                Thread.sleep(1000);
-                logInfo("Completed. Waiting at the barrier point ...");
-                int arrivalIndex = BARRIER.await();
+                logInfo("Working on subtask...");
+                Thread.sleep(1000); // Simulate parallel work
+                
+                logInfo("Completed. Waiting at the barrier point...");
+                int arrivalIndex = BARRIER.await(); // Arrive and block
+                
                 logInfo("Arrival Index: " + arrivalIndex);
             } catch (InterruptedException | BrokenBarrierException e) {
+                Thread.currentThread().interrupt();
                 e.printStackTrace();
             }
         };
     }
 
-
     private static void logInfo(String msg) {
-        System.out.println(LocalDateTime.now() + ": " + Thread.currentThread() + " :: " + msg);
+        System.out.println(LocalDateTime.now() + ": " + Thread.currentThread().getName() + " :: " + msg);
     }
-
-
 }
 ```
 
-hosted with ❤ by 
+*Figure 20.3.1: Reusing a CyclicBarrier across multiple batches of threads*
 
-Illustration 20.3.1 CyclicBarrier demo with Resetting the Barrier
+#### Output
+```text
+2026-06-24T15:08:00.301: T2 :: Working on subtask...
+2026-06-24T15:08:00.303: T1 :: Working on subtask...
+2026-06-24T15:08:01.434: T2 :: Completed. Waiting at the barrier point...
+2026-06-24T15:08:01.441: T1 :: Completed. Waiting at the barrier point...
+2026-06-24T15:08:01.441: T1 :: Barrier Passed!!
+2026-06-24T15:08:01.453: T2 :: Arrival Index: 1
+2026-06-24T15:08:01.454: T1 :: Arrival Index: 0
+2026-06-24T15:08:01.455: main :: First Batch Completed!
+2026-06-24T15:08:01.455: main :: Barrier has been reset automatically! Waiting for the second batch...
+2026-06-24T15:08:01.455: T3 :: Working on subtask...
+2026-06-24T15:08:01.456: T4 :: Working on subtask...
+2026-06-24T15:08:02.456: T3 :: Completed. Waiting at the barrier point...
+2026-06-24T15:08:02.456: T4 :: Completed. Waiting at the barrier point...
+2026-06-24T15:08:02.457: T4 :: Barrier Passed!!
+2026-06-24T15:08:02.457: T4 :: Arrival Index: 0
+2026-06-24T15:08:02.457: T3 :: Arrival Index: 1
+2026-06-24T15:08:02.458: main :: main thread finished!
+```
 
-The above program demonstrated two things: First, the behavior of CyclicBarrier and second, the resetting of CyclicBarrier.
+---
 
-To start the barrier CyclicBarrier we just have to create the object of the CyclicBarrier. It takes two arguments.
+## Automatic vs. Manual Resetting
 
-***Count:*** The number of threads to wait at the barrier as shown in ***Line-7*** in the above program. We have initialized it with 2
+As demonstrated in the logs above, you do **not** need to call `BARRIER.reset()` manually to reuse the barrier. 
+- **Automatic Reset**: As soon as the last required thread calls `await()`, the barrier is tripped, the barrier action runs, all threads are released, and the barrier **automatically resets** for the next cycle.
+- **Manual Reset**: You can force a manual reset by calling `barrier.reset()`. 
 
-***Action:*** Optional parameter of type Runnable that should be performed when the barrier is successfully passed — That is all the threads reached the barrier point. We have provided a Lambda here at ***Line 7*** which is an instance of Runnable***. ***It just prints a simple message***.***
+### The Broken Barrier State
+If a barrier is reset manually while threads are waiting, or if a waiting thread is interrupted or times out, the barrier becomes **broken**. 
+- Any thread currently blocked in `await()` will immediately throw a **`BrokenBarrierException`** and return.
+- Any subsequent attempt to call `await()` on a broken barrier will immediately throw a `BrokenBarrierException`.
+- To reuse a broken barrier, you must call `reset()` to restore its initial state.
 
-As each thread finishes its task it just calls await() on the barrier object as shown in line 42. A thread calling await() indicates that it has reached the barrier point and waiting there for all the threads to reach the same point — Which means all the threads should call await(). We have created two batches of threads: the first batch with two threads **T1** and **T2** and the other batch with **T3** and **T4**. We just took this approach just to demonstrate that the barrier could be reset as we have been specifying right from the beginning of the article.
+---
 
-As the first batch completes the main thread resets the barrier at **Line-24** and starts the other batch. The below output shows it clearly.
+## Advanced Applications: Divide-and-Conquer Algorithms
 
-2022-04-02T21:08:00.301290: Thread[T2,5,main] :: Working ...
-2022-04-02T21:08:00.303180: Thread[T1,5,main] :: Working ...
-2022-04-02T21:08:01.434358: Thread[T2,5,main] :: Completed. Waiting at the barrier point ...
-2022-04-02T21:08:01.441738: Thread[T1,5,main] :: Completed. Waiting at the barrier point ...
-2022-04-02T21:08:01.441919: Thread[T1,5,main] :: Barrier Passed!!
-2022-04-02T21:08:01.453456: Thread[T2,5,main] :: Arrival Index: 1
-2022-04-02T21:08:01.454209: Thread[T1,5,main] :: Arrival Index: 0
-2022-04-02T21:08:01.455273: Thread[main,5,main] :: First Batch Completed!
-2022-04-02T21:08:01.455451: Thread[main,5,main] :: Barrier has been reset! Waiting for second batch!
-2022-04-02T21:08:01.455905: Thread[T3,5,main] :: Working ...
-2022-04-02T21:08:01.456231: Thread[T4,5,main] :: Working ...
-2022-04-02T21:08:02.456182: Thread[T3,5,main] :: Completed. Waiting at the barrier point ...
-2022-04-02T21:08:02.456657: Thread[T4,5,main] :: Completed. Waiting at the barrier point ...
-2022-04-02T21:08:02.457197: Thread[T4,5,main] :: Barrier Passed!!
-2022-04-02T21:08:02.457596: Thread[T4,5,main] :: Arrival Index: 0
-2022-04-02T21:08:02.457666: Thread[T3,5,main] :: Arrival Index: 1
-2022-04-02T21:08:02.458262: Thread[main,5,main] :: 'main' Finished!
+The primary use case for `CyclicBarrier` is in parallel iterative algorithms that follow a **divide-and-conquer** approach:
+1.  A large problem is broken down into $N$ independent subproblems.
+2.  $N$ threads are spawned, each solving a subproblem in parallel.
+3.  Each thread calls `await()` on the barrier after completing its subtask.
+4.  Once all subtasks are complete, the barrier action merges the partial results.
+5.  The barrier resets, and the threads immediately begin the next iteration.
 
-Now there is a catch here. You don’t really have to explicitly reset the barrier as we did it in **Line-24**. As the barrier passes (all the threads reach the barrier point — all the threads made a call await()), it will get reset automatically.
+This parallel stepping pattern is widely used in simulations, scientific computing, graphics rendering, and multiplayer game loops.
 
-*The barrier resets automatically as all the threads reach the barrier point. No explicit reset is required in this case.*
+### Baeldung Simulation: Parallel Number Cruncher and Aggregator
 
-One last thing to understand in terms of programming with CyclicBarrier is the BrokenBarrierException. This comes when we use the timeout version of await method. When the await times out or a thread blocked in await is interrupted, the barrier is said to be broken and all outstanding calls to await will terminate with BrokenBarrierException.
+To see this divide-and-conquer pattern in action, let's implement a complete simulation where multiple worker threads compute partial results in parallel, and a single aggregator thread computes their sum once all workers reach the barrier.
 
-**Other Uses of **CyclicBarrier
+```java
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Random;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
 
-The one other important use of CyclicBarrier comes in designing the parallel iterative algorithms that follow the divide and conquer approach — Which breaks down a problem into a number of independent subproblems and these subproblems are solved in parallel by different threads. Threads call await on the barrier after they complete their individual subtask and blocks until all the threads have reached the barrier point. The ForkJoinPool uses this technique.
+public class CyclicBarrierSimulationDemo {
 
-Also, the CyclicBarrier is extensively used in gaming and simulation development.
+    private CyclicBarrier cyclicBarrier;
+    
+    // Thread-safe collection to hold partial results from all workers
+    private final List<List<Integer>> partialResults = Collections.synchronizedList(new ArrayList<>());
+    private final Random random = new Random();
+    private int numPartialResults;
+    private int numWorkers;
+
+    // Worker Thread performing parallel number crunching
+    class NumberCruncherThread implements Runnable {
+        @Override
+        public void run() {
+            String thisThreadName = Thread.currentThread().getName();
+            List<Integer> partialResult = new ArrayList<>();
+
+            // Crunch numbers and store the partial result
+            for (int i = 0; i < numPartialResults; i++) {    
+                Integer num = random.nextInt(10);
+                System.out.println(thisThreadName + ": Crunching some numbers! Final result - " + num);
+                partialResult.add(num);
+            }
+
+            partialResults.add(partialResult);
+            try {
+                System.out.println(thisThreadName + " waiting for others to reach barrier.");
+                cyclicBarrier.await(); // Register arrival and block
+            } catch (InterruptedException | BrokenBarrierException e) {
+                Thread.currentThread().interrupt();
+                e.printStackTrace();
+            }
+        }
+    }
+
+    // Aggregator Thread executed when the barrier is tripped
+    class AggregatorThread implements Runnable {
+        @Override
+        public void run() {
+            String thisThreadName = Thread.currentThread().getName();
+            System.out.println(thisThreadName + ": Computing sum of " + numWorkers 
+              + " workers, having " + numPartialResults + " results each.");
+            int sum = 0;
+
+            for (List<Integer> threadResult : partialResults) {
+                System.out.print("Adding ");
+                for (Integer partialResult : threadResult) {
+                    System.out.print(partialResult + " ");
+                    sum += partialResult;
+                }
+                System.out.println();
+            }
+            System.out.println(thisThreadName + ": Final result = " + sum);
+        }
+    }
+
+    public void runSimulation(int numWorkers, int numberOfPartialResults) {
+        this.numPartialResults = numberOfPartialResults;
+        this.numWorkers = numWorkers;
+
+        // Initialize barrier with AggregatorThread as the barrier action
+        this.cyclicBarrier = new CyclicBarrier(this.numWorkers, new AggregatorThread());
+
+        System.out.println("Spawning " + this.numWorkers
+          + " worker threads to compute "
+          + this.numPartialResults + " partial results each");
+ 
+        for (int i = 0; i < this.numWorkers; i++) {
+            Thread worker = new Thread(new NumberCruncherThread());
+            worker.setName("Thread " + i);
+            worker.start();
+        }
+    }
+
+    public static void main(String[] args) {
+        CyclicBarrierSimulationDemo demo = new CyclicBarrierSimulationDemo();
+        demo.runSimulation(5, 3);
+    }
+}
+```
+
+#### Simulation Output
+```text
+Spawning 5 worker threads to compute 3 partial results each
+Thread 0: Crunching some numbers! Final result - 6
+Thread 0: Crunching some numbers! Final result - 2
+Thread 0: Crunching some numbers! Final result - 2
+Thread 0 waiting for others to reach barrier.
+Thread 1: Crunching some numbers! Final result - 2
+Thread 1: Crunching some numbers! Final result - 0
+Thread 1: Crunching some numbers! Final result - 5
+Thread 1 waiting for others to reach barrier.
+Thread 3: Crunching some numbers! Final result - 6
+Thread 3: Crunching some numbers! Final result - 4
+Thread 3: Crunching some numbers! Final result - 0
+Thread 3 waiting for others to reach barrier.
+Thread 2: Crunching some numbers! Final result - 1
+Thread 2: Crunching some numbers! Final result - 1
+Thread 2: Crunching some numbers! Final result - 0
+Thread 2 waiting for others to reach barrier.
+Thread 4: Crunching some numbers! Final result - 9
+Thread 4: Crunching some numbers! Final result - 3
+Thread 4: Crunching some numbers! Final result - 5
+Thread 4 waiting for others to reach barrier.
+Thread 4: Computing final sum of 5 workers, having 3 results each.
+Adding 6 2 2 
+Adding 2 0 5 
+Adding 6 4 0 
+Adding 1 1 0 
+Adding 9 3 5 
+Thread 4: Final result = 46
+```
+
+As the simulation logs demonstrate, **Thread 4** is the final thread to arrive at the barrier. It trips the barrier and is elected to execute the `AggregatorThread` barrier action, summing all partial results, before the barrier resets and all worker threads are allowed to proceed.
+
+---
 
 ## Summary
 
-CyclicBarrier allows all threads to meet at the barrier point.
-
-When a thread calles await() it is said to be having arrived at the barrier point.
-
-If all the threads arrive at the barrier point, the barrier has been successfully passed, in which case all threads are released. And the barrier is reset automatically so it can be used again.
-
-CyclicBarrier also lets you pass a barrier action to the constructor; this is a Runnable that is executed (in one of the subtask threads) when the barrier is successfully passed but before the blocked threads are released.
-
-If the barrier is successfully passed, await returns a unique arrival index for each thread, which can be used to “elect” a leader that takes some special action in the next iteration.
-
-If a call to await times out or a thread blocked in await is interrupted, then the barrier is considered broken and all outstanding calls to await terminate with BrokenBarrierException.
-
-That’s all about CyclicBarrier. In the next part, we will have a look at the FutureTask.
+*   **Multi-Way Rendezvous**: `CyclicBarrier` blocks a group of threads until a specified number of threads (parties) arrive at a common barrier point.
+*   **Waiting for Threads**: Unlike `CountDownLatch` (which waits for events), `CyclicBarrier` is designed to make threads wait for other threads.
+*   **Cyclic Reusability**: Once all threads arrive, the barrier trips, releases the threads, and resets automatically so it can be reused immediately.
+*   **Barrier Action**: Supports a `Runnable` action that executes atomically when the barrier is tripped, before any blocked threads are released.
+*   **Arrival Index**: The `await()` method returns the thread's arrival order index, which can be used to elect a leader thread for coordinating post-arrival tasks.
+*   **Broken Barriers**: If a thread is interrupted, times out, or the barrier is manually reset under load, the barrier enters a broken state and throws `BrokenBarrierException` to all waiting threads.

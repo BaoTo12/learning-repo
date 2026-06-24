@@ -1,74 +1,45 @@
-# Life Cycle of a thread with Methods in Thread Class
+# Life Cycle of a Thread and the Thread Class API
 
-For managing threads in java, we have many static and instance methods in the Thread class. We can use these methods for creating, starting, pausing, and stopping threads.
+The `java.lang.Thread` class provides a rich set of static and instance methods to manage, configure, and inspect threads throughout their lifecycle.
 
-## Static Methods
+## Thread Class API Overview
 
-```java
-static int activeCount()
-static Thread currentThread()
-static void dumpStack()
-static boolean interrupted()
-static void sleep()
-static void yield()
-```
+### Static Methods
 
-## Instance Methods
+These methods operate on the thread that is currently executing the code.
 
-```java
-void start()
-long getId()
-String getName()
-int getPriority()
-void interrupt()
-boolean isInterrupted()
-boolean isAlive()
-void join()
-String toString()
-```
+| Method               | Return Type | Description                                                                                     |
+| :------------------- | :---------- | :---------------------------------------------------------------------------------------------- |
+| `currentThread()`    | `Thread`    | Returns a reference to the currently executing thread object.                                   |
+| `activeCount()`      | `int`       | Returns an estimate of the number of active threads in the current thread group.                |
+| `sleep(long millis)` | `void`      | Temporarily pauses execution of the current thread for a specified duration.                    |
+| `yield()`            | `void`      | Hints to the thread scheduler that the current thread is willing to yield its CPU share.        |
+| `interrupted()`      | `boolean`   | Tests whether the current thread has been interrupted, and clears the interrupted status.       |
+| `dumpStack()`        | `void`      | Prints a stack trace of the current thread to the standard error stream (useful for debugging). |
 
-This is not the complete list and we will not even cover all of the above. There are other methods but we don’t really need them unless we build some tiny multithreading frameworks ourselves.
+### Instance Methods
 
-Here in this article, we will discuss the methods related to the lifecycle of threads in Java:start() and sleep(). We will also discuss some of the states in the thread’s lifecycle.
+These methods operate on a specific thread instance.
 
-So, the first step is to create an instance of thread.
+| Method            | Return Type | Description                                                                        |
+| :---------------- | :---------- | :--------------------------------------------------------------------------------- |
+| `start()`         | `void`      | Spawns a new native thread and schedules it to run its `run()` method.             |
+| `getId()`         | `long`      | Returns a unique identifier for the thread.                                        |
+| `getName()`       | `String`    | Returns the name of the thread.                                                    |
+| `getPriority()`   | `int`       | Returns the thread's priority value.                                               |
+| `isAlive()`       | `boolean`   | Checks if the thread has been started and has not yet died.                        |
+| `interrupt()`     | `void`      | Interrupts the thread.                                                             |
+| `isInterrupted()` | `boolean`   | Checks if the thread has been interrupted without clearing the interrupted status. |
+| `join()`          | `void`      | Blocks the caller thread until this target thread completes execution.             |
 
-```java
-public class Greeter extends Thread {
-    @Override
-    public void run() {
-        for (int i = 0; i < 10000000; i++) {
-            if (i == 1000000) {
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
-                }
-            }
-        }
-    }
-}
+---
 
+## The Thread Lifecycle States
 
-Thread greeterThread = new Greeter();
-```
-
-As you can see at line 16, we have created a Thread instance named greeterThread and we have overridden therun()method that performs the actual task. But nothing is happening yet. At this stage, all we’ve got is a plain old Java object of type Thread. It is not yet a thread of execution. A thread of execution means it has its own Execution Context: call stack, variable stack, state, pc register and etc. So it is not considered *alive* yet. At this stage, the thread is said to be in the NEW state. In order to make the thread alive, we have to invoke start()method on it as below.
-
-```java
-greenThread.start();
-```
-
-Once the start() method is invoked, the thread is considered alive. The method isAlive() comes in handy to check whether the thread is alive or not. At this point, the run() method may not have actually started executing yet but the thread is considered alive.
-
-So, this part of the thread’s life is called RUNNABLE. What does it exactly mean when we say a thread is inRUNNABLE state? Well, it is executing in JVM but it may be waiting for other resources from the operating system such as the CPU core in which case run() method’s execution is delayed till the processor is available for this thread.
-
-Next, what if a CPU core is available and the thread’s run() method is now executing? Well, we still say that the thread is in RUNNABLE state. In few books, it is mentioned that the thread goes intorunning state but there is no such state as RUNNING in Java. All the states that we specify here in capital letters are the enums of type State in Thread class.
+The lifecycle of a Java thread is governed by six distinct states, represented by the `Thread.State` enum:
 
 ```java
 public class Thread implements Runnable {
-    // ...............
-    // ...............
     public enum State {
         NEW,
         RUNNABLE,
@@ -77,40 +48,89 @@ public class Thread implements Runnable {
         TIMED_WAITING,
         TERMINATED;
     }
-    // ......................
-    // ......................
 }
 ```
 
-So what’s next after RUNNABLE?
+Let's trace the states using a concrete example:
 
-A thread goes into one of four states from RUNNABLE: BLOCKED, WAITING, TIMED_WAITING, andTERMINATED. We will look at BLOCKED and WAITING in later parts. But we will now cover TIMED_WAITING and TERMINATED here.
+```java
+public class Greeter extends Thread {
+    @Override
+    public void run() {
+        for (int i = 0; i < 10_000_000; i++) {
+            if (i == 1_000_000) {
+                try {
+                    Thread.sleep(1000); // Transitions thread to TIMED_WAITING
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+}
 
-If we call sleep() method in the current running thread, the thread goes into TIMED_WAITING state. The state name TIMED_WAITING makes sense right? Because we are specifying the amount of time that the thread should go to sleep.
+// 1. NEW State
+Thread greeterThread = new Greeter();
+```
 
-When the time expires the thread will eventually come back to the RUNNABLE state and continue from where it left off. (More on this later parts as there other states involved in between)
+---
 
-_NOTE: Remember sleep() is a static method and should always be called in the running thread as you can see in line 7 in Fig 3.1. above._
+### 1. NEW
 
-The next is the dead stage that happens after the successful/abnormal completion of the run() method — then the thread is considered to be TERMINATED. Again the method isAlive() comes in handy to check whether the thread is alive or not.
+When you instantiate a `Thread` class, the thread is in the `NEW` state. It is a plain Java object residing on the heap and does not have an execution context (no call stack, PC register, etc.). The method `isAlive()` returns `false`.
 
-Here is the simple thread lifecycle. We will cover WAITED and BLOCKED states in later parts.
+---
 
-Simple Life Cycle of a Thread
-![alt text](image.png)
+### 2. RUNNABLE
+
+In order to transition a thread into an active state, you must call `start()`.
+
+```java
+greeterThread.start();
+```
+
+Once `start()` is invoked, the thread enters the `RUNNABLE` state and `isAlive()` returns `true`.
+
+> **Mental Model: The RUNNABLE State**
+> A thread in the `RUNNABLE` state is ready to run, but it may or may not be actively executing code at any given microsecond. It is under the control of the OS Thread Scheduler. The thread might be actively running on a CPU core, or it might be waiting in the OS queue for its next CPU time slice. Both scenarios fall under the `RUNNABLE` state in Java.
+
+---
+
+### 3. TIMED_WAITING
+
+When a running thread executes a time-based blocking method like `Thread.sleep(duration)`, it voluntarily relinquishes the CPU and enters the `TIMED_WAITING` state.
+
+> **Pitfall: Calling sleep() on a Thread Reference**
+> Because `sleep()` is a **static** method, it always puts the _currently executing_ thread to sleep. Calling it on a thread reference is highly misleading and a common source of bugs:
+>
+> ```java
+> Thread t = new Thread(task);
+> t.start();
+> t.sleep(1000); // Pitfall: This puts the 'main' thread to sleep, NOT thread 't'!
+> ```
+>
+> Always invoke it as `Thread.sleep(1000)` to make it clear that the current thread is sleeping.
+
+When the sleep duration expires, the thread is awakened and transitioned back to the `RUNNABLE` state, waiting for the OS scheduler to assign it a CPU core to resume.
+
+---
+
+### 4. TERMINATED
+
+A thread enters the `TERMINATED` state once its `run()` method finishes executing, either by completing successfully or by throwing an unhandled exception. Once terminated, the thread is dead; it cannot be restarted, and calling `start()` on it again will throw an `IllegalThreadStateException`. The `isAlive()` method returns `false`.
+
+### Thread Lifecycle Diagram
+
+Below is the transition flow of a thread's lifecycle:
+
+_Figure 3.1: Thread Lifecycle_
+![alt text](../images/image2.png)
+
+---
 
 ## Summary
 
-Creating an instance of the type Thread just creates a java thread but it is not yet the thread of execution. Thread of execution means, the thread has its own execution context like call stack, local variable stack, state, and etc.
-
-When a thread is created, it is said to be in NEW state.
-
-Upon calling start() method on thread object, the thread of execution is created and the thread is said to be in RUNNABLE state.
-
-Calling start() does not necessarily mean the thread’s run() method is executing. run() method’s execution may be deferred.
-
-When the thread is in RUNNABLE we can call sleep() which puts the thread into TIMED_WAITING state.
-
-When the time expires, the thread eventually comes back to RUNNABLE state and continues from where it left off.
-
-Upon the successful or abnormal completion of run() method, the thread goes into TERMINATED state.
+- **NEW State:** The thread object exists but has no OS execution context. `isAlive()` is `false`.
+- **RUNNABLE State:** The thread is active, executing in the JVM, or waiting for OS resources (like CPU time slices). `isAlive()` is `true`.
+- **TIMED_WAITING State:** The thread is temporarily suspended due to a timed block (like `Thread.sleep()`).
+- **TERMINATED State:** The thread has completed its `run()` method and is dead. It cannot be resurrected.

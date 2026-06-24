@@ -1,122 +1,144 @@
-# The atomic variables — AtomicXXX classes
+# The Atomic Variables — AtomicXXX Classes
 
-The java.util.concurrent.atomic package provides several atomic classes for different data types, such as AtomicInteger, AtomicLong, AtomicBoolean, and AtomicReference, to name a few.
+The `java.util.concurrent.atomic` package provides a suite of classes—such as **`AtomicInteger`**, **`AtomicLong`**, **`AtomicBoolean`**, and **`AtomicReference`**—that support lock-free, thread-safe operations on single variables.
 
-All these *AtomicXXX* classes internally use CASing — The Compare-and-Swap, which we have already seen in . In this article, we will go a little deeper. So, let’s jump right in.
+Under the hood, all these **`AtomicXXX`** classes discard traditional thread blocking and software locks in favor of hardware-level **Compare-And-Swap (CAS)** operations, which we explored in Module 17-2. In this module, we will analyze the internal architecture of atomic classes and see how they interface with low-level memory offsets.
 
-To start with, we will implement an atomic counter using AtomicInteger class. Look at the below AtomicCounter class which is used by multiple threads concurrently.
+---
+
+## Implementing an Atomic Counter
+
+Let's implement a thread-safe counter using `AtomicInteger`. Multiple threads will increment the counter concurrently:
 
 ```java
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
-
 public class AtomicCounter {
-
 
     private final AtomicInteger counter = new AtomicInteger();
 
-
     public void increment() {
-        counter.getAndIncrement(); // Performs CAS Internally
+        // Performs an atomic, lock-free increment
+        counter.getAndIncrement(); 
     }
-
 
     public int get() {
         return counter.get();
     }
 
-
     public static void main(String[] args) throws InterruptedException {
         AtomicCounter atomicCounter = new AtomicCounter();
 
-
-        Thread t
-= new Thread(incrementLambda(atomicCounter, 1000));
-        Thread t
-= new Thread(incrementLambda(atomicCounter, 1000));
-
+        // Create two concurrent threads to increment the counter
+        Thread t1 = new Thread(incrementLambda(atomicCounter, 1000), "t1");
+        Thread t2 = new Thread(incrementLambda(atomicCounter, 1000), "t2");
 
         t1.start();
         t2.start();
 
-
         t1.join();
         t2.join();
 
-
         System.out.println("Counter now is: " + atomicCounter.get());
     }
-
 
     private static Runnable incrementLambda(AtomicCounter atomicCounter, int range) {
         return () -> IntStream.rangeClosed(1, range)
                 .forEach(i -> atomicCounter.increment());
     }
-
-
 }
 ```
 
-hosted with ❤ by 
+*Figure 18.1: Thread-safe AtomicCounter implementation using AtomicInteger*
 
-Illustration 18.1 AtomicCounter class
+---
 
-The main thing in the AtomicCounter class that is of our interest is counter.getAndIncrement() at line 9. This method internally calls the getAndAddInt() on an object of type sun.misc.Unsafe class. This is the story till Java 8. From Java 9 this has been changed to jdk.internal.misc.Unsafe. There are important reasons for this which are not of our concern for now. But there will be a separate article for it.
+## How getAndIncrement() Works Under the Hood
 
-The Unsafe class is a collection of methods for performing low-level, unsafe operations. So in our case, Unsafe.getAndAddInt() method is what actually performs the low-level CAS operation. All the *AtomicXXX* classes(in fact many of the classes in java.util.concurrent package) internally uses this Unsafe class.
+The core method in our example is `counter.getAndIncrement()`. 
+- In **Java 8**, this method delegates to `sun.misc.Unsafe.getAndAddInt()`.
+- In **Java 9 and later**, it delegates to an internal, highly optimized version in `jdk.internal.misc.Unsafe` (utilizing VarHandles).
 
-This method performs three steps and the final operation is actually the CAS operation.
+The **`Unsafe`** class is a collection of low-level, native methods that bypass JVM safety checks to perform direct memory manipulation. It acts as the bridge between Java and the CPU's hardware-level CAS instructions.
 
-The actual value stored in the counter variable is copied to a temporary variable which is known to be the *old value*.
+When a thread calls `getAndIncrement()`, the JVM executes a three-step optimistic loop:
+1.  **Read (Volatile)**: The current value stored in the variable is read directly from memory (the **old value**).
+2.  **Calculate**: The thread calculates the updated value (old value + 1) in its local stack.
+3.  **CAS (Compare-And-Swap)**: The thread attempts to write the new value back to memory. The CPU compares the current memory value with the old value:
+    - If they match, no other thread modified the variable. The CPU writes the new value and returns `true`.
+    - If they do not match, another thread modified the variable first. The operation fails, returns `false`, and the thread **loops back to Step 1** to try again.
 
-The temporary variable is incremented which is to be the new value.
+---
 
-***CAS: ***Compare the *old value *with the original value. If it is unchanged, then swap the old value for the new value. Otherwise, repeat the process from Step 1.
+## Exploring the Unsafe Source Code
 
-The most important thing here to be noted is, the last operation is the atomic operation. The underlying low-level code ensures this to be atomic.
-
-Now that we understand CAS, let’s look at the source code of Unsafe.getAndAddInt() method which is copy-pasted here below just as a reference of what it exactly does.
+Let's examine the JDK source code for `Unsafe.getAndAddInt()` to see this loop in action:
 
 ```java
 @HotSpotIntrinsicCandidate
 public final int getAndAddInt(Object o, long offset, int delta) {
     int v;
     do {
-        v = **getIntVolatile**(o, offset);
-    } while (!**weakCompareAndSetInt**(o, offset, v, v + delta));
+        v = getIntVolatile(o, offset);
+    } while (!weakCompareAndSetInt(o, offset, v, v + delta));
     return v;
 }
-To understand this better we need to understand the parameters o and offset.
 ```
 
-**o** : refers to the object on the heap. In our case, this is our AtomicInteger object.
+*Figure 18.2: Volatile spin-loop inside Unsafe.getAndAddInt()*
 
-**offset**: Offset of the field that is in the object specified by o. If you look at AtomicInteger class source code you will see something like this.
+### Understanding the Parameters
+
+*   **`o`**: The target object on the heap (in our case, the `AtomicInteger` instance).
+*   **`offset`**: The exact memory address offset of the target field within the object `o`. 
+
+To perform direct memory operations on a private field, `AtomicInteger` must map the field's memory offset during class loading. It does so in a static block:
 
 ```java
-private static final long ***VALUE**** *= *U*.**objectFieldOffset**(AtomicInteger.class, "value");
+private static final long VALUE = U.objectFieldOffset(AtomicInteger.class, "value");
 ```
 
-We will have a clear understanding of this in the next article. But for now, understand that offset refers to the field named value in the AtomicInteger class.
+*   **`getIntVolatile(o, offset)`**: Atomically retrieves the value of the integer field located at the memory `offset` of object `o`, using volatile memory barrier semantics to guarantee visibility.
+*   **`weakCompareAndSetInt(o, offset, v, v + delta)`**: Executes the hardware-level CAS instruction. It compares the value at `offset` with `v`. If equal, it writes `v + delta` (where `delta` is 1 for an increment) and returns `true`. If a conflict occurs, it returns `false`, causing the `do-while` loop to execute again.
 
-getIntVolatile() gets the volatile variable from the specified offset, which is the value of the filed “value" in AtomcInteger class.
+---
 
-weakCompareAndSetInt() internally calls compareAndSetInt() which compares the copied value v with the current value at the offset and if both are equal, updates the value at the offset with v + delta.
+## Simplified Lock-Free Loop Logic
 
-v + delta in our case is v + 1 since this increment operation.
-
-The following pseudo-code simplifies the above code snippet to understand it better.
+To understand the core behavior without low-level memory offsets, we can represent the logical flow of `getAndIncrement()` using the following simplified Java pseudocode:
 
 ```java
 public final int getAndIncrement() {
     for (;;) {
-        int current = get();
-        int next = current + 1; 
-        if (Unsafe.**compareAndSet**(current, next))
+        int current = get(); // Read current volatile value
+        int next = current + 1; // Calculate next value
+        
+        // Attempt to update. If successful, return the old value.
+        if (compareAndSet(current, next)) {
             return current;
+        }
+        // If CAS fails, loop spins and retries automatically
     }
 }
 ```
 
-The *AtomicXXX* classes can be better understood if Unsafe class is understood. So the next article is dedicated to Unsafe.
+> **Mental Model: Optimistic Spin-Locks**
+> Traditional synchronization is **pessimistic**: a thread locks a resource, preventing anyone else from accessing it, even if no conflict occurs.
+> 
+> Atomic variables are **optimistic**: a thread attempts to update the variable assuming there is no conflict. Only if a conflict actually occurs (the CAS fails) does the thread retry. 
+> 
+> This retry loop is called a **spin-lock** or **optimistic spin**. It is highly efficient because the thread never sleeps or yields its CPU slice; it simply retries the cheap CAS operation instantly, maximizing throughput under low-to-medium contention.
+
+Because `Unsafe` plays such a critical role in enabling these low-level concurrent operations, the next module is dedicated entirely to exploring `Unsafe` and its capabilities.
+
+---
+
+## Summary
+
+*   **AtomicXXX Classes**: Part of the `java.util.concurrent.atomic` package, providing thread-safe, lock-free operations on single variables (`AtomicInteger`, `AtomicLong`, etc.).
+*   **CAS Foundation**: Under the hood, all atomic operations rely on hardware-level Compare-And-Swap (CAS) instructions to update state atomically.
+*   **Unsafe Delegation**: Native CAS operations are executed via the low-level `sun.misc.Unsafe` (Java 8) or `jdk.internal.misc.Unsafe` (Java 9+) classes.
+*   **Memory Offsets**: To perform lock-free operations, atomic classes use `Unsafe.objectFieldOffset()` to map the exact memory location of their underlying private fields.
+*   **Optimistic Spin Loops**: When an atomic operation fails due to concurrent modifications, the thread does not block. Instead, it spins in a retry loop, reads the updated value, and attempts the CAS again.
+*   **Efficiency**: Atomic variables avoid the heavy scheduling and context-switching overhead of OS-level blocking locks, making them exceptionally fast in concurrent applications.

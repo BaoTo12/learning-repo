@@ -1,44 +1,39 @@
-# Synchronizing the Threads with synchronized
+# Synchronizing the Threads with synchronized
 
-_NOTE: Please follow the content till the end as I tried to explain the things at the bytecode level._
+In the previous modules, we explored the methods `join()`, `sleep()`, and `yield()` and their behaviors. Now, we will look at how threads can be synchronized to safely access shared data. In Java, **shared data** simply means an object instance (like a `Counter` class) that contains mutable state accessed by multiple threads.
 
-In  we have seen the methods join, sleep, and yield with their behaviors. Now it is time to look at how the threads can be synchronized to access the shared data. In Java, shared data simply means another object that contains some data for the threads to function: For example the instance of type Counter.
+Simply put, in a multi-threaded environment, a **race condition** occurs when two or more threads attempt to update mutable shared data at the same time. Java offers a mechanism to avoid race conditions by synchronizing thread access to shared data. A piece of logic marked with `synchronized` becomes a **synchronized block**, allowing only one thread to execute it at any given time.
 
-But in the first place why there is a need for synchronizing the threads to access the object - the Shared Data.
+---
 
-Let’s imagine a common scenario of displaying the number of hits of a particular website on the UI. The backend servers need to maintain a counter that keeps track of the number of hits. And for every request, there is a request handler that runs in a specific thread that needs to access the counter object and call increment on it.
+## The Problem: Unsynchronized Shared State (Race Conditions)
 
-Let's look at the below example where we have two threads, accessing the same Counter object. Each thread is incrementing the counter 100000 times. At the end of both threads completing their execution, the expected output should be 200000 because each thread performs 100000 increments.
+To understand why synchronization is necessary, let's explore two concrete examples of race conditions: one using raw threads in a loop, and another using modern thread pools and JUnit assertions.
+
+### Example 1: Multithreaded Counter (Raw Threads)
+
+Let's imagine a common scenario of displaying the number of hits of a particular website on a UI. The backend servers need to maintain a counter that keeps track of the number of hits. For every request, there is a request handler running in a specific thread that needs to access this counter object and increment it.
+
+In the program below, we have two threads accessing the same `Counter` object. Each thread increments the counter 100,000 times. The expected final count should be exactly 200,000.
 
 ```java
 package org.vit.threads;
 
-
 class Counter {
-
-
     private int value;
-
 
     public void increment() {
         ++value;
     }
 
-
     public int get() {
         return value;
     }
-
-
 }
 
-
 public class CounterDemo {
-
-
     public static void main(String[] args) throws InterruptedException {
         Counter counter = new Counter();
-
 
         Runnable incrementTask = () -> {
             for (int i = 0; i < 100000; i++) {
@@ -46,166 +41,156 @@ public class CounterDemo {
             }
         };
 
-
-        Thread t
-= new Thread(incrementTask, "T1");
-        Thread t
-= new Thread(incrementTask, "T2");
-
+        Thread t1 = new Thread(incrementTask, "T1");
+        Thread t2 = new Thread(incrementTask, "T2");
 
         long start = System.nanoTime();
         t1.start();
         t2.start();
 
-
-        t1.join(); // Wait here till T
-completes
-        t2.join(); // Wait here till T
-completes
+        t1.join(); // Wait here till T1 completes
+        t2.join(); // Wait here till T2 completes
         long end = System.nanoTime();
 
         String timeTaken = String.format("%.2f", (end - start) / 1000000.0);
         System.out.println("Final Counter Value: " + counter.get() + " Time Taken: " + timeTaken + " millis");
     }
-
-
 }
 ```
 
-hosted with ❤ by 
+Running this program multiple times yields inconsistent results:
+*   **RUN #1:** Final Counter Value: `108815` (Time Taken: 9.63 ms)
+*   **RUN #2:** Final Counter Value: `174793` (Time Taken: 3.13 ms)
+*   **RUN #3:** Final Counter Value: `138996` (Time Taken: 8.55 ms)
 
-The Counter object without thread synchronization
+None of the runs show the correct result of 200,000.
 
-In the above code, we have created a task incrementTask (line 22–26) that increments the counter 100000 times. And we have created two threads each performing this incrementTask. So at the end of the program, we should expect the final value of the counter to be 200000. But run it multiple times and see the output. I have run it thrice and below are the outputs.
+### Example 2: Multithreaded Summation (Thread Pools and JUnit)
 
-**RUN #1**Final Counter Value: 108815 Time Taken: 9.63 millis
-
-**RUN #2** Final Counter Value: 174793 Time Taken: 3.13 millis
-
-**RUN #3** Final Counter Value: 138996 Time Taken: 8.55 millis
-
-You can see I have got three different results and none of the outputs has shown me the result of 200000. The place where things go sideways is the increment() method of the Counter class at line 8. This code region (In our example this is a single statement. In most of the problems it is multiple statements) is what we refer to as a region that leads to Race Condition. Though the statement ++value appears to be a single statement in the Java file, when the code is compiled, the single statement turns out to be multiple bytecodes. We can clearly see this if we can extract the bytecode of the counter class. Here is how you can do this.
-
-Run this command against the Counter.class file.
-
-_javap -c Counter.class_
-
-And you will get the following output.
+Let's consider another typical race condition where we calculate a sum, and multiple threads execute a `calculate()` method concurrently:
 
 ```java
-Compiled from "CounterDemo.java"
-class org.vit.threads.Counter {
-  org.vit.threads.Counter();
-    Code:
-       0: aload_
-1: invokespecial #
-// Method java/lang/Object."<init>":()V
-       4: return
+public class SynchronizedMethods {
 
+    private int sum = 0;
 
-  public void increment();
-    Code:
-       0: aload_
-1: dup
-       2: getfield      #
-// Field value:I
-       5: iconst_
-6: iadd
-       7: putfield      #
-// Field value:I
-      10: return
+    public void calculate() {
+        setSum(getSum() + 1);
+    }
 
+    public int getSum() {
+        return sum;
+    }
 
-  public int get();
-    Code:
-       0: aload_
-1: getfield      #
-// Field value:I
-       4: ireturn
+    public void setSum(int sum) {
+        this.sum = sum;
+    }
 }
 ```
 
-hosted with ❤ by 
+We can write a unit test to execute this calculation concurrently using an `ExecutorService` thread pool:
 
-The above is the byte code of the class Counter. Look at the public void increment();. The snippet of interest is from lines 11 to 16. There are 6 bytecode instructions that represent the method body which contains the single java statement++value. Let's look at these byte codes.
+```java
+@Test
+public void givenMultiThread_whenNonSyncMethod() throws InterruptedException {
+    ExecutorService service = Executors.newFixedThreadPool(3);
+    SynchronizedMethods summation = new SynchronizedMethods();
 
-**aload_0**Load reference from local variable. The _0 is the index of the local variable array in the current frame of the stack (of the current running thread).
+    IntStream.range(0, 1000)
+      .forEach(count -> service.submit(summation::calculate));
+    service.awaitTermination(1000, TimeUnit.MILLISECONDS);
 
-**dup** duplicate the value onto the operand stack.
+    assertEquals(1000, summation.getSum());
+}
+```
 
-**getfield** Fetch field from the object ( which is probably this).
+We are using an `ExecutorService` with a 3-thread pool to execute the `calculate()` method 1,000 times. If executed sequentially, the expected output would be exactly 1,000. However, the multi-threaded execution fails almost every time with an inconsistent actual output:
 
-**iconst_1** Push the int constant with the value 1 to operand stack.
+```text
+java.lang.AssertionError: expected:<1000> but was:<965>
+at org.junit.Assert.fail(Assert.java:88)
+at org.junit.Assert.failNotEquals(Assert.java:834)
+...
+```
 
-**iadd** Pop two int values from the operand stack and add them.
+---
 
-**putfield **Set field in the object (this).
+> **Problem: The Race Condition**
+> The place where things go wrong is the unsynchronized increment operation (`++value` or `setSum(getSum() + 1)`). These statements appear to be single, atomic operations in Java, but at the bytecode level, they translate to multiple instructions. When multiple threads interleave these instructions without synchronization, updates are silently overwritten, resulting in a race condition.
 
-For ease of our explanation, let's classify the above byte codes into three operations.
+---
 
-**Read Operation**: aload_0, dup, getfield
+## Bytecode Analysis of ++value
 
-**increment Operation:** iconst_1, iadd
+We can inspect the compiled bytecode of the `Counter` class using the JDK's disassembler tool:
 
-**Write Operation**: putfield
+```bash
+javap -c Counter.class
+```
 
-So in a sense, the single java statement **++value** is converted into 3 operations when it goes to JVM for execution. This is where things go out of order in the sense of multithreading.
+This command outputs the following bytecode for the `increment()` method:
 
-_There are a lot of optimizations done by the JIT and JVM at run time like reordering of instructions. We will look at this part in later sections. But for now, we will only look at the concept of out of ordering from the perspective of multithreading._
+```text
+  public void increment();
+    Code:
+       0: aload_0
+       1: dup
+       2: getfield      #7                  // Field value:I
+       5: iconst_1
+       6: iadd
+       7: putfield      #7                  // Field value:I
+      10: return
+```
 
-The thing to remember is the single java statement ++value becomes three operations when it arrives at JVM for execution. And these three operations are getting executed by two threads: T1 and T2, interleaving the JVM randomly at any of these three operations. We will look at the two scenarios one the happy scenario and the other with some inconsistency.
+The single Java statement `++value` is compiled into six bytecode instructions. We can group them into three primary operations:
 
-## The Happy Scenario
+1.  **Read Operation (`aload_0`, `dup`, `getfield`):** Fetches the current value of the field from the object instance and loads it onto the operand stack.
+2.  **Increment Operation (`iconst_1`, `iadd`):** Pushes the constant integer `1` onto the stack and adds it to the value.
+3.  **Write Operation (`putfield`):** Writes the sum back to the object's instance variable in heap memory.
 
-In the happy path, what happens is, all the three operations are executed by T1 sequentially without getting disturbed by any other thread. Then T2 comes and executes the three operations in a sequence undisturbed by the other thread. Let’s say the current value of the variable is 10. The expectation is that when T1 and T2 complete their operations the counter value must be 12.
+Because the CPU executes these operations in interleaved sequences, thread context switches can happen at any instruction boundary.
 
-## T1 & T2 Execution Sequence in the Happy Path:
+---
 
-T1 reads the value which is 10
+### The Happy Path vs. The Inconsistent Path
 
-T1 Increments it 11 (Still in its local stack)
+#### The Happy Path
+If the threads execute sequentially without interruption:
 
-T1 Writes back to the value 11
-
-T2 now reads the value which is 11 because T1 has written the value that is incremented.
-
-T2 Increments it 12 (Still in its local stack)
-
-T2 Writes back the value which is 12 in the counter object.
-
-This is the happy path. Now let's look at the scenario where it leads to inconsistent results. Now assume the value of the counter is 12 and when the T1 & T2 complete their operations the final counter value should be 14.
-
-## T1 & T2 Execution Sequence in the Inconsistent Scenario:
-
-T1 reads the value which is 12
-
-T1 Increments it 13 (Still in its local stack) and T2 pre-empted.
-
-T2 now reads the value which is 12 because T1 has NOT written the value that it incremented.
-
-T2 Increments it 13 (Still in its local stack) and T1 pre-empted.
-
-T1 writes back the value 13 because that is the result that T1 has in its own stack. And T2 pre-empted.
-
-T2 writes back the value 13 because that is the result that T2 has in its own stack.
-
-The final value is 13 but the expected is 14. This is the scenario that we have been specifying from the beginning to be out-of-order and leads to inconsistent results. The following diagram depicts both scenarios clearly.
+*Figure 7.1: Thread Interleaving*
 ![alt text](../images/image4.png)
-Now I hope you understood the problem. Note that we are also aware that the happy path gives us consistent results. So there are kinds of solutions.
 
-First, somehow instruct the JVM to run that the threads are always with the order mentioned in the happy path. There are again two ways to do this.
+1.  `T1` reads the counter value (e.g., `10`).
+2.  `T1` increments it to `11` in its local execution frame.
+3.  `T1` writes `11` back to the shared heap variable.
+4.  `T2` reads the updated value (`11`).
+5.  `T2` increments it to `12`.
+6.  `T2` writes `12` back.
+*   **Result:** `12` (Correct).
 
-Using synchronized keyword
+#### The Inconsistent Path
+If a context switch occurs mid-operation:
+1.  `T1` reads the counter value (e.g., `12`).
+2.  `T1` increments it to `13` in its local stack frame. **[Context Switch]**
+3.  `T2` preempts `T1` and reads the counter value. Because `T1` has not written its result yet, `T2` reads `12`.
+4.  `T2` increments it to `13` in its local stack frame. **[Context Switch]**
+5.  `T1` writes its local result (`13`) back to the heap.
+6.  `T2` writes its local result (`13`) back to the heap, overwriting `T1`'s write.
+*   **Result:** `13` instead of `14`. One increment is completely lost!
 
-Using the class ReentrantLock in java.util.concurrent.locks library.
+---
 
-Second, Using AtomicXXX classes that use the Compare-And-Swap (CAS) constructs.
+## The Solution: Thread Synchronization
 
-We will park ReentrantLocks and Atomic Classes for later. Now, we will only look at synchronized keyword.
+To prevent race conditions, we must ensure that only one thread can execute the **critical section** (the code accessing shared mutable state) at any given time. This is called **mutual exclusion**.
 
-There are two ways of using the synchronized keyword.
+Java provides the built-in `synchronized` keyword to achieve this. There are two primary ways to apply it to instance members:
 
-First, to use it with methods in the method signature as below:
+### 1. Synchronized Instance Methods
+
+We can add the `synchronized` keyword to the method declaration. When an instance method is synchronized, it locks over the **instance of the class** owning the method (`this`). This means only one thread per instance of the class can execute this method at any given time.
+
+Let's synchronize the `increment()` method in our `Counter` class:
 
 ```java
 public synchronized void increment() {
@@ -213,7 +198,41 @@ public synchronized void increment() {
 }
 ```
 
-Second, to use a synchronized as a block as below:
+Once synchronized, the `CounterDemo` program will always print exactly `200000`.
+
+Similarly, we can synchronize the `calculate()` method in the `SynchronizedMethods` class:
+
+```java
+public synchronized void synchronisedCalculate() {
+    setSum(getSum() + 1);
+}
+```
+
+We can verify this with a concurrent unit test:
+
+```java
+@Test
+public void givenMultiThread_whenMethodSync() throws InterruptedException {
+    ExecutorService service = Executors.newFixedThreadPool(3);
+    SynchronizedMethods method = new SynchronizedMethods();
+
+    IntStream.range(0, 1000)
+      .forEach(count -> service.submit(method::synchronisedCalculate));
+    service.awaitTermination(100, TimeUnit.MILLISECONDS);
+
+    assertEquals(1000, method.getSum());
+}
+```
+
+With the method marked `synchronized`, the test case passes with the correct output of `1000`.
+
+---
+
+### 2. Synchronized Blocks Within Methods
+
+Sometimes, synchronizing the entire method is unnecessary and restricts concurrency too much. We can synchronize only a specific block of instructions within the method instead.
+
+We pass a monitor object reference (like `this`) as a parameter to the synchronized block. The code inside the block gets synchronized on that monitor object:
 
 ```java
 public void increment() {
@@ -223,18 +242,67 @@ public void increment() {
 }
 ```
 
-Out of these two, the latter(synchronized block) provides the flexibility of guarding the code at a finer granular level. We can put whatever statements that we think to result in inconsistency in the synchronized block rather than making the whole method synchronized.
-
-This is only the beginning. In a later chapter, we will deep dive into synchronized keyword where we look at the byte codes and understand what is happening in JVM.
-
-## Summary:
-
-In JVM, the order of the threads is not guaranteed. It all depends on JVM’s Thread Scheduler.
-
-When there are two or more threads accessing the shared data, it may lead to inconsistent results because of the fact that these threads race on each other to execute a particular block of code. This leads to a race condition.
-
-There are two ways we can instruct JVM to execute a particular block of code without interference: synchronized and ReentrantLock
+For our summation class, we can implement it as follows:
 
 ```java
-synchronized can be used with methods and code blocks. It provides more flexibility with the block of code as we can deal with it at a finer granular level.
+public class SynchronizedBlocks {
+
+    private int count = 0;
+
+    public void performSynchronisedTask() {
+        synchronized (this) {
+            setCount(getCount() + 1);
+        }
+    }
+
+    public int getCount() {
+        return count;
+    }
+
+    public void setCount(int count) {
+        this.count = count;
+    }
+}
 ```
+
+We can verify that this synchronized block passes the concurrent test suite:
+
+```java
+@Test
+public void givenMultiThread_whenBlockSync() throws InterruptedException {
+    ExecutorService service = Executors.newFixedThreadPool(3);
+    SynchronizedBlocks synchronizedBlocks = new SynchronizedBlocks();
+
+    IntStream.range(0, 1000)
+      .forEach(count -> 
+        service.submit(synchronizedBlocks::performSynchronisedTask));
+    service.awaitTermination(100, TimeUnit.MILLISECONDS);
+
+    assertEquals(1000, synchronizedBlocks.getCount());
+}
+```
+
+---
+
+> **Mental Model: The Mutual Exclusion Gateway**
+> Think of a synchronized block or method as a guarded gate. To enter the gate, a thread must acquire the single **Key** (the monitor lock) associated with the guard object (like `this`). Once inside, the thread holds the key. Any other thread arriving at the gate will find it locked, entering a **BLOCKED** state until the first thread exits the gate and returns the key.
+
+---
+
+> **Pitfalls: Performance and Thread Contention**
+> While marking methods as `synchronized` is simple, it blocks all other threads trying to access any synchronized members on the same instance. This causes thread contention, context switching overhead, and severely limits the parallelism of your application. Never synchronize blocks that perform blocking I/O or long-running computations.
+
+---
+
+> **Insights: Granularity Control**
+> Always prefer synchronized blocks over synchronized methods when possible. Synchronized blocks allow you to specify **finer granularity**, minimizing the size of the critical section and restricting locking to only the lines of code that touch shared mutable data. This keeps the lock hold time short and improves overall application throughput.
+
+---
+
+## Summary
+
+*   **Race Conditions:** Occur when multiple threads concurrently read and write to a shared variable. What appears as a single statement (like `++value` or `setSum(getSum() + 1)`) is actually multiple bytecode operations (Read-Modify-Write) that can be interleaved.
+*   **Mutual Exclusion:** The mechanism of ensuring only one thread executes a critical section of code at a time to maintain data consistency.
+*   **The `synchronized` Keyword:** Java's built-in tool for mutual exclusion. It can be applied at the method level or as a block.
+*   **Lock Scope:** Instance synchronized methods and blocks using `this` lock on the specific object instance. Only one thread can execute any synchronized code on that instance at a time.
+*   **Granularity:** Synchronized blocks allow for finer control over which sections of code are guarded, improving performance compared to synchronizing entire methods.

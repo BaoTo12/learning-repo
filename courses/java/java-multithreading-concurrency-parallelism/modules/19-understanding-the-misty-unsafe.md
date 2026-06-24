@@ -1,472 +1,399 @@
-# Understanding the misty Unsafe
+# Understanding the Misty Unsafe
 
-***The name of the class Unsafe comes from the fact that it deals with. The sun.misc.Unsafe is really meant to be a low-level VM library interface designed to be used strictly within the JDK. It is not intended for external use and was not part of the supported Java public interface.***
+The name of the class **`sun.misc.Unsafe`** comes from the fact that it bypasses the safety guarantees of the Java programming language. It is designed as a low-level virtual machine library interface for internal use within the JDK. It is not intended for external use, nor is it part of the supported public Java API.
 
-***Most of the concurrent collection classes and the fork-join framework in java.util.concurrency are written with the help of Unsafe class. In fact, in Java 1.4, the reflections, serialization, and the NIO packages are re-written with Unsafe to improve the performance. java.math.BigInteger, java.math.BitDecimal are also rewritten with Unsafe in Java 7.***
+Despite being internal, `sun.misc.Unsafe` is the bedrock of Java's high-performance concurrency framework. Most of the concurrent collections and the fork-join framework in `java.util.concurrent` are written with its help. In fact, major portions of Java's reflection, serialization, and NIO packages were rewritten using `Unsafe` to improve performance. Similarly, core mathematical classes like `java.math.BigInteger` and `java.math.BigDecimal` leverage `Unsafe` under the hood.
 
-***The sun.misc.Unsafe is really meant to be a low-level VM library interface designed to be used strictly in the JDK. It is not intended for external use.***
+---
 
-***Though the Unsafe is not intended for use outside the JDK, there are the libraries that uses Unsafe. But the real experts that know the low-level details can write better and safer programs with Unsafe. And below are a few such projects.***
+## Why External Libraries Use Unsafe
 
-***Cassandra******
-Kafka******
-Zookeeper******
-LAMX Disruptor framework******
-Akka******
-Hibernate******
-Hadoop******
-HBase******
-Ehcache******
-Spring******
-Mockito and many more.***
+Although not intended for public use, many popular, high-performance external libraries and frameworks rely on `Unsafe` to achieve maximum speed and bypass JVM limitations. Some notable examples include:
 
-***There is a lot of buzz around the Unsafe class that from Java 9, it is gonna be deprecated or completely removed. If that is the case, what happens to the above projects if they have to be upgraded to later Java versions? Well, this is not only the case with Unsafe, but also all the internal APIs. But our concern is NOT to explore this now but just to understand what Unsafe can do. For more information on this please look at the ****** (JEP — JDK Enhancement Proposal).***
+*   **Databases & Messaging**: Apache Cassandra, Apache Kafka, Apache HBase, Apache Hadoop.
+*   **Coordination & Messaging**: Apache ZooKeeper, Akka.
+*   **Performance Frameworks**: LMAX Disruptor (a high-performance inter-thread messaging library).
+*   **Enterprise Frameworks**: Spring Framework, Hibernate, Ehcache.
+*   **Testing Tools**: Mockito.
 
-## The Unsafe class is capable of doing many things, such as:
+There is significant discussion regarding the deprecation or removal of internal APIs like `sun.misc.Unsafe` in modern Java versions (Java 9+). To provide a safe, supported alternative, the JDK team introduced **VarHandles** (JEP 193) to encapsulate safe, high-performance variable access. However, our focus in this module is simply to understand what `Unsafe` can do and how it operates under the hood.
 
-## Accessing Hardware CPU feature — Compare And Swap
+---
 
-## Managing Native Memory
+## Capabilities of the Unsafe Class
 
-## Creating an object without running its constructor.
+The `Unsafe` class is extremely powerful and is capable of:
+1.  **Direct Hardware Access**: Executing hardware-level atomic operations like Compare-And-Swap (CAS).
+2.  **Off-Heap Memory Management**: Allocating, freeing, and accessing native memory directly, bypassing the JVM heap and Garbage Collector.
+3.  **Constructor Bypassing**: Instantiating classes without executing their constructors or static initializers.
+4.  **Runtime Class Generation**: Generating and loading classes directly into the JVM at runtime.
+5.  **Ultra-Fast Serialization**: Bypassing standard Java serialization overhead to read and write raw object fields.
+6.  **Massive Native Arrays**: Creating arrays larger than `Integer.MAX_VALUE` elements.
+7.  **Non-Blocking Concurrency**: Providing the low-level primitives needed to build lock-free data structures.
 
-## Generate Classes at runtime.
+---
 
-## Faster Serialization
+## Obtaining the Unsafe Instance
 
-## Creating Arrays Bigger than the size of Integer.MAX_VALUE.
+`Unsafe` is designed as a Singleton, but its factory method `getUnsafe()` is guarded by a security check:
 
-## Non-Blocking Concurrency
-
-## In this article, we will look at several examples that illustrate the above points.
-
-***Before we go into them let’s understand the Unsafe API. The API contains several methods. Some for manipulating the objects, some for classes, some for getting the low-level memory information, some for array manipulation and etc.***
-
-## Getting the ‘Unsafe’ object
-
-***Unsafe is a singleton class. And it has a static factory method to return us the Unsafe object. We can get the Unsafe object as below.***
-
-## public class UnsafeDemo {
-    private final Unsafe UNSAFE = Unsafe.getUnsafe();
+```java
+public class UnsafeDemo {
+    // This throws a SecurityException at runtime
+    private final Unsafe UNSAFE = Unsafe.getUnsafe(); 
 }
-
-***But do you think you can get the object so easily for a class that is capable of doing many low-level operations? No! When you run the above code, it throws the SecurityException as below.***
-
-***Caused by: java.lang.SecurityException: Unsafe******
-    at jdk.unsupported/sun.misc.Unsafe.getUnsafe(Unsafe.java:99)***
-
-***Why is this? This is because there is a security check implemented in the sun.misc.Unsafe class. The below is the internal implementation of sun.misc.Unsafe.getUnsafe() method.***
-
-```java
-***public static Unsafe getUnsafe() {******
-    Class<?> caller = Reflection.getCallerClass();******
-    if (!VM.isSystemDomainLoader(caller.getClassLoader()))******
-        throw new SecurityException("Unsafe");******
-    return theUnsafe;******
-}***
 ```
 
-***What the above code ensures is that the class that the method Unsafe.getUnsafe() is getting called from must be loaded by the classloader that is in the system domain in which all the permissions are granted. But our UnsafeDemo class above is not loaded by the system domain class loader. Then how can we get the object of Unsafe. Well, there are two ways to get it.***
-
-## Making our code trusted using -Xbootclasspath runtime flag.
-
-## Using an easy hack that is all over stackoverflow.com(explained below).
-
-## The Hack to get Unsafe object.
-
-***We can use the below hack to get the Unsafe object. As we already specified the Unsafe is a singleton class and has the object already created with the reference variable theUnsafe and ready to eat. We can get that variable using Java reflection as below.***
+Running this code results in a `java.lang.SecurityException: Unsafe` because of the internal security check in `sun.misc.Unsafe.getUnsafe()`:
 
 ```java
-***Field f = Unsafe.class.getDeclaredField("theUnsafe");******
-f.setAccessible(true);******
-Unsafe unsafe = (Unsafe) f.get(null);***
+public static Unsafe getUnsafe() {
+    Class<?> caller = Reflection.getCallerClass();
+    if (!VM.isSystemDomainLoader(caller.getClassLoader()))
+        throw new SecurityException("Unsafe");
+    return theUnsafe;
+}
 ```
 
-***Now there is one small problem with the above code. In later versions of Java, if this variable name is changed to some other name let’s say theGreatUnsafe then our code breaks when we upgrade to that Java version. In that case, we need to modify our code with the new name, which I think is not really a big deal considering the advantages that this class offers.***
+The JVM verifies whether the calling class was loaded by the **Bootstrap ClassLoader** (system domain). Since standard application classes are loaded by the Application ClassLoader, the check fails. 
 
-## Methods of “Unsafe”
+To bypass this check and obtain the `Unsafe` instance, we can use two methods:
+1.  **Boot Classpath Flag**: Run the application with the `-Xbootclasspath` flag to make the application trusted.
+2.  **Reflection Hack**: Access the private, pre-allocated static field `theUnsafe` using reflection.
 
-***There are many methods that Unsafe provides. It will not look good if we specify all the methods here at once. Instead, we take a scenario to implement, discuss the methods that are useful for that scenario and implement an example with those methods.***
-
-## 1. Managing Native Memory:
-
-***We will implement a program in which we allocate four bytes from the native memory (outside the heap) and we set and get the values to and from that native memory. For this, we will have to look at three methods.***
-
-***allocateMemory(long bytes): Allocates a new block of native memory, of the given size in bytes and returns the base address of the allocated memory. This class must have a corresponding freeMemory() call to release the allocated memory back to Operating System and it is the responsibility of the caller to invoke this method. Otherwise, this leads to native memory leakages.***
-
-## putInt(long address, int value): Puts the integervalue at the specified memory location.
-
-## getInt(long address): Get the integer value from the specified address.
-
-## Below is the program that illustrates these methods.
+### The Reflection Hack
 
 ```java
 import sun.misc.Unsafe;
-
-
 import java.lang.reflect.Field;
 
+public class UnsafeAccessor {
+    public static Unsafe getUnsafe() {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            return (Unsafe) f.get(null);
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to access Unsafe", e);
+        }
+    }
+}
+```
+
+If the internal variable name changes in a future JVM release, this reflection-based approach will break, which is why relying on internal APIs is discouraged for production applications.
+
+---
+
+## Practical Examples of Using Unsafe
+
+Let's explore several concrete examples demonstrating the capabilities of the `Unsafe` class.
+
+### 1. Off-Heap (Native) Memory Management
+
+> **Mental Model: Off-Heap vs. Heap Memory**
+> - **Heap Memory**: Managed by the JVM. Objects are subject to Garbage Collection (GC). Frequent allocations can cause GC pauses.
+> - **Off-Heap Memory**: Allocated directly from the operating system's native memory. It is completely invisible to the GC, eliminating GC overhead. However, it must be managed manually.
+
+To manage native memory, `Unsafe` provides three core methods:
+*   **`allocateMemory(long bytes)`**: Allocates a block of native memory and returns its starting memory address (pointer).
+*   **`putInt(long address, int value)`**: Writes an integer value directly to the specified memory address.
+*   **`getInt(long address)`**: Reads an integer value from the specified memory address.
+*   **`freeMemory(long address)`**: Releases the allocated native memory block back to the operating system.
+
+> [!CAUTION]
+> **Native Memory Leak Warning**
+> Native memory is **not** managed by the Garbage Collector. Every call to `allocateMemory()` must have a corresponding `freeMemory()` call. Failing to release native memory results in severe memory leaks that can crash the entire operating system.
+
+Here is a program demonstrating manual off-heap memory management:
+
+```java
+import sun.misc.Unsafe;
+import java.lang.reflect.Field;
 
 public class UnsafeInteger {
-
-
     private static final Unsafe UNSAFE = getUnsafe();
-    private static final int BYTES = 4;
+    private static final int BYTES = 4; // An integer requires 4 bytes
     private long address;
-
-
-    private static Unsafe getUnsafe() {
-        Field f = null;
-        try {
-            f = Unsafe.class.getDeclaredField("theUnsafe");
-            f.setAccessible(true);
-            return (Unsafe) f.get(null);
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            e.printStackTrace();
-            throw new RuntimeException(e.getMessage(), e);
-        }
-    }
-
-
-    public void init() {
-        address = UNSAFE.allocateMemory(BYTES);
-    }
-
-
-    public void set(int value) {
-        UNSAFE.putInt(address, value);
-    }
-
-
-    public int get() {
-        return UNSAFE.getInt(address);
-    }
-
-
-    public void destroy() {
-        UNSAFE.freeMemory(address);
-    }
-
-
-    public static void main(String[] args) {
-        UnsafeInteger integer = new UnsafeInteger();
-        integer.init(); // Allocate
-bytes Native memory
-        System.out.println("Before Set: " + integer.get());
-        integer.set(1000);
-        System.out.println("After Set: " + integer.get());
-        integer.destroy(); // Free
-bytes from Native memory
-    }
-
-
-}
-```
-
-## hosted with ❤ by
-
-## Illustration 19.1 Managing off-heap memory with Unsafe
-
-***Since this is native memory that we are dealing with we provided init() and destroy() methods explicitly to allocate and free the native memory. In line 42, it calls init() to allocate 4 bytes and in line 46 it invokes destroy() that releases these 4 bytes to Operating System. In line 43 we have printed the value before setting any value and this would print some garbage value and then we set the integer 1000. Here is the output of the program.***
-
-## Before Set: 1615194544
-After Set: 1000
-
-## 2. Avoiding the Constructor Execution in Creating an Object
-
-***To create an object without executing the constructor we need to use allocateInstance() method. This may be useful when a class doesn’t have any public constructor.***
-
-```java
-import sun.misc.Unsafe;
-
-
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
-
-
-public class UnsafeClassInstantiation {
-
-
-    static class Demo {
-        private int value;
-
-
-        public Demo() {
-            System.out.println("Demo Constructor Called!!");
-            value = 1;
-        }
-
-
-    }
-
-
-    public static void main(String[] args) throws InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
-        Demo d
-= new Demo();
-        System.out.println("D
-Value: " + d1.value);
-
-
-        Demo d
-= Demo.class.getDeclaredConstructor(null).newInstance();
-        System.out.println("D
-Value: " + d2.value);
-
-
-        Demo d
-= (Demo) getUnsafe().allocateInstance(Demo.class);
-        System.out.println("D
-Value: " + d3.value);
-    }
-
-
-    private static Unsafe getUnsafe() {
-        Field f = null;
-        try {
-            f = Unsafe.class.getDeclaredField("theUnsafe");
-            f.setAccessible(true);
-            return (Unsafe) f.get(null);
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            e.printStackTrace();
-            throw new RuntimeException(e.getMessage(), e);
-        }
-    }
-}
-```
-
-## hosted with ❤ by
-
-## Illustration 19.2 Bypassing Constructor Execution while Creating Object
-
-## And here is the output of the program.
-
-***Demo Constructor Called!!******
-D1 Value: 1******
-Demo Constructor Called!!******
-D2 Value: 1******
-D3 Value: 0***
-
-***You can see from the above output, the constructor has not been invoked when we used Unsafe.allocateInstance(). Now, this is funny. Think of it once.***
-
-## What happens to all the Singleton classes in the world?
-
-***We can still create a second object for all those singletons with the above approach, right? That’s why people say that singleton is an anti-pattern and should be carefully implemented.***
-
-## 3. Creating arrays in Native Memory
-
-***This is similar to what we have seen in the first scenario. This is a little more complex example of what we have seen for managing off-heap memory. But why do we need to create arrays in native memory rather than in heap? There is another advantage of this. Have you ever created an array in Java that exceeds the size of Integer.MAX_VALUE? Because the array subscript only takes an int value. For example, look at the code snippet below this would result in a compilation error saying int is expected.***
-
-***long bigValue = (long) Integer.MAX_VALUE + Integer.MAX_VALUE;******
-long[] bigArray = new long[bigValue]; // Compilation Error!!***
-
-***In these scenarios, we can use Unsafe as below to allocate bigger sizes from native memory. And of course, it is the programmers' responsibility to manage this memory in a safer manner. Note that we have used bigValue * 4 in the below example because we are allocating memory for integers. Each integer is of 4 bytes.***
-
-```java
-***long bigValue = (long) Integer.MAX_VALUE + Integer.MAX_VALUE;******
-long arrBaseAddress = getUnsafe().allocateMemory(bigValue * 4);***
-```
-
-## The following code illustrates this feature.
-
-```java
-import sun.misc.Unsafe;
-
-
-import java.lang.reflect.Field;
-
-
-public class UnsafeHugeIntArray {
-
-
-    private static final Unsafe UNSAFE = getUnsafe();
-    private static final int BYTES = 4;
-    private long ARR_BASE_ADDRESS;
-
-
-    private static Unsafe getUnsafe() {
-        Field f = null;
-        try {
-            f = Unsafe.class.getDeclaredField("theUnsafe");
-            f.setAccessible(true);
-            return (Unsafe) f.get(null);
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            e.printStackTrace();
-            throw new RuntimeException(e.getMessage(), e);
-        }
-    }
-
-
-    public void init(long size) {
-        ARR_BASE_ADDRESS = UNSAFE.allocateMemory(size * BYTES);
-    }
-
-
-    public void destroy() {
-        UNSAFE.freeMemory(ARR_BASE_ADDRESS);
-    }
-
-
-    public void insert(int value, long index) {
-        UNSAFE.putInt(ARR_BASE_ADDRESS + index * BYTES, value);
-    }
-
-
-    public int get(long index) {
-        return UNSAFE.getInt(ARR_BASE_ADDRESS + index * BYTES);
-    }
-
-
-    public static void main(String[] args) {
-        UnsafeHugeIntArray hugeIntArray = new UnsafeHugeIntArray();
-        long bigValue = (long) Integer.MAX_VALUE + 100;
-        hugeIntArray.init(bigValue);
-
-
-        // Set
-values from
-to
-indexes
-        for (int i = 0; i < 20; i++) {
-            hugeIntArray.insert(i, i);
-        }
-
-
-        // Get
-values from
-to
-indexes
-        for (int i = 0; i < 20; i++) {
-            System.out.print(hugeIntArray.get(i) + " ");
-        }
-        System.out.println();
-
-
-
-
-        // Set and get the index larger than Integer.MAX_VALUE
-        long someIndex = bigValue - 10;
-        hugeIntArray.insert(100000, someIndex);
-        System.out.println("Value at Index: " + someIndex + " is: " + hugeIntArray.get(someIndex));
-        hugeIntArray.destroy();
-    }
-}
-```
-
-## hosted with ❤ by
-
-## Illustration 19.3 Creating Big Arrays greater than size Integer.MAX_VALUE
-
-***In line 24, the init() method allocates the memory. Remember the Unsafe.allocateMemory() takes the value as bytes. Since we are dealing with integers here, we needed to multiply it with BYTES which is with the value 4.***
-
-***We have inserted the first 20 values and we read and printed them. Then we took some arbitrary index that is greater than Integer.MAX_VALUE. Then we used this index to put and set the values just to prove that we can do so.***
-
-## 4. Getting the Field Offset Address Defined in a Class
-
-***Understanding this section is very important as this is by far the most important and common usages of Unsafe class — Getting the field offset address in an object.***
-
-***By now you might have understood that almost all the methods in the Unsafe class expect a long variable. This long variable can be of two types.***
-
-***A base address of the allocated memory using allocateMemory(). This is what we have seen so far.***
-
-***An offset address of a field inside an object. This we will look at in this example. Once we have a field address, we can set or get the values to and from it in the object that it is related to. Unsafe class has a method objectFieldOffset to get the offset address of a field defined in a class.***
-
-***objectFieldOffset(Field f): Gives us the location of a given field in the storage allocation of its class.***
-
-## For example, the below code snippet is from AtomicInteger class.
-
-```java
-***Field f = AtomicInteger.class.getDeclaredField("value");******
-valueOffset = unsafe.objectFieldOffset(f);***
-```
-
-***Once we get this offset address we can use Unsafe.putInt() to set and Unsafe.getInt() to get the value from that offset. The below program better illustrates this.***
-
-```java
-import sun.misc.Unsafe;
-
-
-import java.lang.reflect.Field;
-
-
-public class UnsafeFiledOffsetDemo {
-
-
-    private int unsafeValue;
-
-
-    private static final Unsafe UNSAFE = getUnsafe();
-    private static final long unsafeValueOffset;
-
-
-    static {
-        try {
-            Field f = UnsafeFiledOffsetDemo.class.getDeclaredField("unsafeValue");
-            unsafeValueOffset = UNSAFE.objectFieldOffset(f);
-        } catch (Exception ex) {
-            throw new Error(ex);
-        }
-    }
-
 
     private static Unsafe getUnsafe() {
         try {
             Field f = Unsafe.class.getDeclaredField("theUnsafe");
             f.setAccessible(true);
             return (Unsafe) f.get(null);
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            e.printStackTrace();
-            throw new RuntimeException(e.getMessage(), e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
+    public void init() {
+        // Allocate 4 bytes of native memory
+        address = UNSAFE.allocateMemory(BYTES);
+    }
+
+    public void set(int value) {
+        // Write the integer to the allocated memory address
+        UNSAFE.putInt(address, value);
+    }
+
+    public int get() {
+        // Read the integer from the memory address
+        return UNSAFE.getInt(address);
+    }
+
+    public void destroy() {
+        // Explicitly free the native memory
+        UNSAFE.freeMemory(address);
+    }
 
     public static void main(String[] args) {
-        UnsafeFiledOffsetDemo obj = new UnsafeFiledOffsetDemo();
-        System.out.println("Before Set: " + obj.unsafeValue);
-        UNSAFE.putInt(obj, unsafeValueOffset, 1000);
-        System.out.println("After Set: " + obj.unsafeValue);
+        UnsafeInteger integer = new UnsafeInteger();
+        integer.init(); // Allocate 4 bytes of off-heap memory
+        
+        // Prints a garbage value representing whatever was in that memory location
+        System.out.println("Before Set (Garbage Value): " + integer.get()); 
+        
+        integer.set(1000);
+        System.out.println("After Set: " + integer.get());
+        
+        integer.destroy(); // Free the memory block
     }
 }
 ```
 
-## hosted with ❤ by
+*Figure 19.1: Allocating and managing off-heap memory using Unsafe*
 
-## Illustration 19.4 Getting Field Offset Address
+#### Output
+```text
+Before Set (Garbage Value): 1615194544
+After Set: 1000
+```
 
-***This is rather a simple thing to understand. But look at line 35. This is another variant of putInt() method. This version of putInt() takes three arguments.***
+---
 
-***obj: The object in which the value needs to be set.******
-offset: which is the field offset address.******
-value: The value to be set in that offset address.***
+### 2. Bypassing Constructor Execution
 
-***This variant of the putInt() method is what is used by AtomicInteger. And in the next section, we will implement our own non-blocking thread-safe integer.***
+`Unsafe` allows you to allocate an instance of a class directly on the heap without invoking its constructor, instance initializers, or field initializers. This is done using the **`allocateInstance()`** method.
 
-## 5. Concurrent Non-Blocking Thread-Safe Integer
+> [!TIP]
+> **Insight: Singleton Bypass**
+> Standard singleton patterns rely on a `private` constructor to prevent multiple instantiations. However, `Unsafe.allocateInstance()` completely bypasses the constructor, allowing malicious or poorly written code to create multiple instances of a Singleton class. This is why some developers refer to singletons as anti-patterns when strict isolation is required.
 
-***We have been telling about Compare-And-Swap and here is how to implement it using Unsafe. We can implement our own AtomicInteger with Unsafe class. For this, we need to know one important method that is compareAndSwapInt().***
-
-***compareAndSwapInt(): Atomically updates the integer variable if it is currently holding the expected value.***
-
-## Let’s now write our own thread-safe Integer class, and let’s call it as ConcurrentInteger.
+Here is a program demonstrating constructor bypassing:
 
 ```java
 import sun.misc.Unsafe;
-
-
 import java.lang.reflect.Field;
 
+public class UnsafeClassInstantiation {
+
+    static class Demo {
+        private int value;
+
+        public Demo() {
+            System.out.println("Demo Constructor Called!!");
+            value = 1;
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        // 1. Standard instantiation (invokes constructor)
+        Demo d1 = new Demo();
+        System.out.println("D1 Value: " + d1.value);
+
+        // 2. Reflection instantiation (invokes constructor)
+        Demo d2 = Demo.class.getDeclaredConstructor().newInstance();
+        System.out.println("D2 Value: " + d2.value);
+
+        // 3. Unsafe instantiation (bypasses constructor entirely)
+        Demo d3 = (Demo) getUnsafe().allocateInstance(Demo.class);
+        System.out.println("D3 Value: " + d3.value); // Prints 0 (uninitialized)
+    }
+
+    private static Unsafe getUnsafe() {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            return (Unsafe) f.get(null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+```
+
+*Figure 19.2: Bypassing constructor execution during object instantiation*
+
+#### Output
+```text
+Demo Constructor Called!!
+D1 Value: 1
+Demo Constructor Called!!
+D2 Value: 1
+D3 Value: 0
+```
+
+Notice that for `d3`, the constructor was never called, and its `value` field remained at its default uninitialized state of `0`.
+
+---
+
+### 3. Creating Ultra-Large Native Arrays
+
+In standard Java, arrays cannot exceed `Integer.MAX_VALUE` (approximately 2.14 billion) elements because array subscripts must be represented as 32-bit integers.
+
+Using `Unsafe` off-heap memory allocation, we can allocate memory blocks using `long` sizes, enabling the creation of native arrays that easily exceed the 32-bit limit:
+
+```java
+long bigSize = (long) Integer.MAX_VALUE + 100;
+// Allocate space for (2.14 billion + 100) integers (each taking 4 bytes)
+long arrBaseAddress = getUnsafe().allocateMemory(bigSize * 4); 
+```
+
+Below is a complete program demonstrating how to read and write to an ultra-large native array:
+
+```java
+import sun.misc.Unsafe;
+import java.lang.reflect.Field;
+
+public class UnsafeHugeIntArray {
+    private static final Unsafe UNSAFE = getUnsafe();
+    private static final int BYTES = 4; // Size of an int
+    private long arrBaseAddress;
+
+    private static Unsafe getUnsafe() {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            return (Unsafe) f.get(null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public void init(long size) {
+        // Allocate contiguous memory block for the native array
+        arrBaseAddress = UNSAFE.allocateMemory(size * BYTES);
+    }
+
+    public void insert(int value, long index) {
+        // Calculate memory address offset: Base Address + (Index * Element Size)
+        UNSAFE.putInt(arrBaseAddress + (index * BYTES), value);
+    }
+
+    public int get(long index) {
+        return UNSAFE.getInt(arrBaseAddress + (index * BYTES));
+    }
+
+    public void destroy() {
+        UNSAFE.freeMemory(arrBaseAddress);
+    }
+
+    public static void main(String[] args) {
+        UnsafeHugeIntArray hugeIntArray = new UnsafeHugeIntArray();
+        long bigSize = (long) Integer.MAX_VALUE + 100;
+        hugeIntArray.init(bigSize);
+
+        // Populate and read the first 20 elements
+        for (int i = 0; i < 20; i++) {
+            hugeIntArray.insert(i, i);
+        }
+        for (int i = 0; i < 20; i++) {
+            System.out.print(hugeIntArray.get(i) + " ");
+        }
+        System.out.println();
+
+        // Access an index far beyond Integer.MAX_VALUE
+        long hugeIndex = bigSize - 10;
+        hugeIntArray.insert(999999, hugeIndex);
+        System.out.println("Value at Index " + hugeIndex + " is: " + hugeIntArray.get(hugeIndex));
+
+        hugeIntArray.destroy(); // Clean up native memory
+    }
+}
+```
+
+*Figure 19.3: Creating and accessing a native array exceeding Integer.MAX_VALUE elements*
+
+---
+
+### 4. Retrieving Field Offsets in a Class
+
+One of the most common and important use cases of `Unsafe` is retrieving the memory offset of a class field using **`objectFieldOffset()`**:
+
+```java
+// Get the memory offset of the private 'value' field in AtomicInteger
+Field f = AtomicInteger.class.getDeclaredField("value");
+long valueOffset = unsafe.objectFieldOffset(f);
+```
+
+Once a thread has this memory offset, it can read or write directly to the field inside any instance of that class, bypassing access checks and standard getters/setters:
+
+```java
+import sun.misc.Unsafe;
+import java.lang.reflect.Field;
+
+public class UnsafeFieldOffsetDemo {
+    private int unsafeValue;
+
+    private static final Unsafe UNSAFE = getUnsafe();
+    private static final long unsafeValueOffset;
+
+    static {
+        try {
+            // Get the field object
+            Field f = UnsafeFieldOffsetDemo.class.getDeclaredField("unsafeValue");
+            // Map its physical memory offset
+            unsafeValueOffset = UNSAFE.objectFieldOffset(f);
+        } catch (Exception ex) {
+            throw new Error(ex);
+        }
+    }
+
+    private static Unsafe getUnsafe() {
+        try {
+            Field f = Unsafe.class.getDeclaredField("theUnsafe");
+            f.setAccessible(true);
+            return (Unsafe) f.get(null);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static void main(String[] args) {
+        UnsafeFieldOffsetDemo obj = new UnsafeFieldOffsetDemo();
+        System.out.println("Before Direct Write: " + obj.unsafeValue);
+        
+        // Write directly to the memory offset of the field inside 'obj'
+        UNSAFE.putInt(obj, unsafeValueOffset, 1000);
+        
+        System.out.println("After Direct Write: " + obj.unsafeValue);
+    }
+}
+```
+
+*Figure 19.4: Writing directly to a private field's memory offset*
+
+#### Output
+```text
+Before Direct Write: 0
+After Direct Write: 1000
+```
+
+---
+
+### 5. Implementing a Custom Atomic Integer
+
+By combining **field offsets** with the native atomic method **`compareAndSwapInt()`**, we can implement our own fully functional, non-blocking `AtomicInteger` class from scratch:
+
+```java
+import sun.misc.Unsafe;
+import java.lang.reflect.Field;
 
 public class ConcurrentInteger {
 
-
     private volatile int val;
 
-
     private static final Unsafe UNSAFE = getUnsafe();
-
-
     private static final long valOffset;
-
 
     static {
         try {
@@ -477,42 +404,36 @@ public class ConcurrentInteger {
         }
     }
 
-
     private static Unsafe getUnsafe() {
         try {
             Field f = Unsafe.class.getDeclaredField("theUnsafe");
             f.setAccessible(true);
             return (Unsafe) f.get(null);
-        } catch (NoSuchFieldException | IllegalAccessException e) {
-            e.printStackTrace();
-            throw new RuntimeException(e.getMessage(), e);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
     }
 
-
-    public ConcurrentInteger() {
-    }
-
+    public ConcurrentInteger() {}
 
     public ConcurrentInteger(int val) {
         this.val = val;
     }
 
-
     public final int get() {
         return val;
     }
 
-
     public int increment() {
         int expected, newVal;
         do {
+            // Read the volatile value directly from memory
             expected = UNSAFE.getIntVolatile(this, valOffset);
             newVal = expected + 1;
+            // Attempt hardware-level CAS
         } while (!UNSAFE.compareAndSwapInt(this, valOffset, expected, newVal));
         return expected;
     }
-
 
     public int decrement() {
         int expected, newVal;
@@ -523,59 +444,59 @@ public class ConcurrentInteger {
         return expected;
     }
 
-
     public static void main(String[] args) throws InterruptedException {
-        ConcurrentInteger uci = new ConcurrentInteger();
+        ConcurrentInteger counter = new ConcurrentInteger();
 
-
-        Thread t
-= new Thread(incrementTask(uci), "T1");
-        Thread t
-= new Thread(incrementTask(uci), "T2");
-        Thread t
-= new Thread(decrementTask(uci), "T3");
-
+        // T1 and T2 increment the counter 1 million times each
+        Thread t1 = new Thread(incrementTask(counter), "T1");
+        Thread t2 = new Thread(incrementTask(counter), "T2");
+        // T3 decrements the counter 1 million times
+        Thread t3 = new Thread(decrementTask(counter), "T3");
 
         t1.start();
         t2.start();
         t3.start();
 
-
         t1.join();
         t2.join();
         t3.join();
 
-
-        System.out.println("Counter Value now is: " + uci.get());
+        // Net expected value: (1,000,000 * 2) - 1,000,000 = 1,000,000
+        System.out.println("Counter Value now is: " + counter.get());
     }
-
 
     private static Runnable incrementTask(final ConcurrentInteger uci) {
         return () -> {
-            for (int i = 1; i <= 1000000; i++) {
+            for (int i = 1; i <= 1_000_000; i++) {
                 uci.increment();
             }
         };
     }
 
-
     private static Runnable decrementTask(final ConcurrentInteger uci) {
         return () -> {
-            for (int i = 1; i <= 1000000; i++) {
+            for (int i = 1; i <= 1_000_000; i++) {
                 uci.decrement();
             }
         };
     }
-    
 }
 ```
 
-## hosted with ❤ by
+*Figure 19.5: Custom AtomicInteger using Unsafe CAS primitives*
 
-***Take a look at the increment() and decrement() methods above. Each method first copies the value into variable expected, adds value 1 to it and stores it into newVal, and performs CAS. The compareAndSetInt() method returns false if the expected and the original value at the specified filed offset address are not equal. And we will do these operations till the value is successfully updated. This is what is done by AtomicInteger internally.***
+#### Output
+```text
+Counter Value now is: 1000000
+```
 
-***And to test whether this is giving us thread-safety or not, we have created three threads: T1, T2, and T3, where T1 and T2 both increment the value 1 million times each, and T3 decrements it 1 million times. As a result, after all the thread complete their execution the final value of ConcurrentInteger should be 1000000. And here is the output.***
+---
 
-## Counter Value now is: 1000000
+## Summary
 
-***There are lot more that we can with Unsafe. One can look at the documentation to understand more of what it offers.***
+*   **JVM Escapism**: `sun.misc.Unsafe` bypasses Java's safety guarantees to execute raw, low-level virtual machine and hardware operations directly.
+*   **JDK Bedrock**: It is the foundation of the high-performance classes in `java.util.concurrent`, reflection, NIO, and serialization.
+*   **Off-Heap Allocation**: Allows allocating native memory outside the JVM heap. This avoids GC pressure but requires manual deallocation (`freeMemory`) to prevent system-crashing memory leaks.
+*   **Constructor Bypassing**: The `allocateInstance` method instantiates objects without running constructors or field initializers, bypassing standard Singleton patterns.
+*   **Large Scale Subscripts**: Native allocations using `long` values enable the creation of off-heap arrays that easily exceed the 32-bit `Integer.MAX_VALUE` size limit of standard Java arrays.
+*   **Direct Field Offsets**: The `objectFieldOffset` method exposes the exact memory location of a private field, enabling direct lock-free CAS updates (`compareAndSwapInt`) and forming the foundation of all `Atomic` variables.

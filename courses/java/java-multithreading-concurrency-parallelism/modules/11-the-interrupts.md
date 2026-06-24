@@ -1,19 +1,36 @@
-# The interrupts
+# The Interrupts
 
-In  we have seen the behavior of wait & notify and their purpose in multithreaded programming. Here we will see yet another small concept that most people get confused about — *The Interrupts*
+In the previous module, we explored the behavior of `wait` and `notify` and their purpose in thread communication. In this module, we will discuss another core concurrency concept that is frequently misunderstood: **Thread Interrupts**.
 
-An *interrupt* is an indication to a thread that it should stop what it is doing and do something else. It’s up to the programmer to decide exactly how a thread responds to an interrupt, but it is very common practice to make the thread stop.
+An **interrupt** is a collaborative mechanism that tells a thread it should stop what it is doing and perform a different action (typically, terminate gracefully). It is up to the programmer to decide exactly how a thread responds to an interrupt, but the standard practice is to clean up and exit.
 
-But who interrupts the threads in the first place? Well, one thread interrupts the other. Because whether or not we use the threads in Java JVM creates one thread, the main thread, with which our program execution begins. So it is one thread that interrupts another thread by invoking the method interrupt() on the target thread object which is to be interrupted.
+---
 
-For the interrupt mechanism to work properly, the thread that is being interrupted must support the interruption. What do we mean by this? Suppose, we have two threads T1 and T2. T1 interrupts T2 by calling T2.interrupt() , then T2 must have some logic to support or handle this interrupt (since the T2 is the target thread). We call this logic the I***nterrupt Handler***. Then, how do threads implement these interrupt handlers? Well, this depends on what we want and what the thread is doing at the time of interrupt. But the common practice is to stop the thread that is being interrupted. There are two typical ways to handle the interrupts.
+## Triggering and Supporting Interruption
 
-First, all the methods that throw InterruptedException such as: Thread.sleep(), Thread.join(), Object.wait() have the built-in interrupt handlers. All we need to do is to catch this InterruptedException and handle it in the catch block. So the exception handler (the try-catch block of InterruptedException) becomes the Interrupt Handler. As a general practice, the logic in the interrupt handler (the catch block) is written in such a way that it stops the thread itself. It is a common practice to stop the thread in InterruptHandler though it all depends on our use case. But the InterruptHandlers are the nicer way to stop the threads (gracefully without using Thread.stop() ). You all know that*Thread.stop() is not a recommended way of stopping the thread* (More on this later). The following better explains this behavior.
+How do threads interrupt each other? A thread sends an interrupt by invoking the `interrupt()` method on the target `Thread` object:
+
+```java
+targetThread.interrupt();
+```
+
+For the interrupt mechanism to work properly, the thread being interrupted must actively support it. If a thread is interrupted but contains no logic to check or handle the interrupt, the signal is simply ignored.
+
+There are two primary ways to handle thread interrupts depending on what the thread is doing:
+1.  **Handling InterruptedException (for blocking operations)**
+2.  **Checking the Interrupted Status Flag (for CPU-intensive operations)**
+
+---
+
+### 1. Handling InterruptedException
+
+Methods that block for long periods—such as `Thread.sleep()`, `Thread.join()`, and `Object.wait()`—throw an `InterruptedException`. These methods have built-in interrupt detection.
+
+When a thread is in a blocking state (like `TIMED_WAITING` or `WAITING`) and another thread calls `interrupt()` on it, the blocking method immediately wakes up, clears the interrupt flag, and throws an `InterruptedException`.
 
 ```java
 public class StoppingThreadWithInterrupt extends Thread {
-
-
+    @Override
     public void run() {
         System.out.print(Thread.currentThread().getName() + ": I am doing work ");
         while (true) {
@@ -22,102 +39,97 @@ public class StoppingThreadWithInterrupt extends Thread {
                 Thread.sleep(1000);
             } catch (InterruptedException e) {
                 System.out.println("\n" + Thread.currentThread().getName() + ": I have been Interrupted!!");
-                break;
+                break; // Exit the loop and terminate the thread
             }
         }
         System.out.println("End of the thread: " + Thread.currentThread().getName() + "!");
     }
 
-
     public static void main(String[] args) throws InterruptedException {
-        Thread t
-= new StoppingThreadWithInterrupt();
+        Thread t1 = new StoppingThreadWithInterrupt();
         t1.start();
         Thread.sleep(5000);
-        t1.interrupt();
+        t1.interrupt(); // Signal t1 to stop
         Thread.sleep(1000);
         System.out.println("End of the thread: " + Thread.currentThread().getName() + "!");
     }
-
-
 }
 ```
 
-hosted with ❤ by 
-
-Illustration 11.1: Stopping Threads Gracefully using Interrupts
-
-Let us dive deep into the above program. It represents the first way of handling the interrupts — *With the methods that throw *InterruptedException*. *We have already specified that these methods (sleep, join, wait and etc) have built-in interrupt handlers. So what is happening in the above program is, the main thread creates another thread t1 (at line 18) and starts it. And the main thread sleeps for 5 seconds. The thread t1 calls Thread.sleep() in a loop (t1 goes into TIMED_WAITING state for every second). Then the main thread interrupts the t1. When a thread calls Thread.sleep() or Thread.join() or Object.wait() it goes into eitherWAITING orTIMED_WAITING state. When a thread is in one of these states and Thread.interrupt() is invoked on that thread object, the built-in interrupt handler kicks in, does some stuff, and throws the InterruptedException which we have to catch. So in our program, when the main thread calls t1.interrupt() and t1 is in TIMED_WAITINGstate(since it is intermittently calling Thread.sleep()), the built-in interrupt handlers kicks in and raises the InterruptedException. The catch block, at line 11, then breaks from the loop and completes the thread. This is what we mean by stopping the thread gracefully without calling Thread.stop(). In fact, we are not exactly stopping the thread but we are taking the thread to its completion. Here is the output of the above program.
-
+**Output:**
+```text
 Thread-0: I am doing work . . . . .
 Thread-0: I have been Interrupted!!
 End of the thread: Thread-0!
 End of the thread: main!
+```
 
-But, I would suggest you run the program on your machines once to know the behavior exactly. We missed a few important points here about the interrupts — The Interrupt Status Flag
+By catching the `InterruptedException` and breaking the loop, we allow the thread to clean up and exit gracefully. This is the recommended way to stop a thread (unlike the deprecated `Thread.stop()` method).
+
+---
 
 ## The Interrupt Status Flag
 
-The interrupt mechanism is implemented using an internal flag known as the *interrupt status*. When we invoke t1.interrupt(), it sets the interrupt status flag. This can be checked using t1.isInterrupted(). There is another static method Thread.interrupted() which also returns the boolean value stating whether the thread is interrupted or not. But the sole purpose of this static method is to clear the interrupt status flag.
+The interrupt mechanism relies on an internal boolean flag called the **interrupt status flag**. 
 
-People generally get confused between these two methods. So the ***instance*** method isInterrupted() is to check whether the interrupt status flag is set or not (In other words, to check whether a thread is interrupted or not) and the static method interrupted() is to clear the flag.
+Java provides two methods to check this flag, and understanding the difference between them is vital:
+*   **`isInterrupted()` (Instance Method):** Checks the target thread's interrupt status flag. It returns `true` if the thread is interrupted, and does **not** modify the flag.
+*   **`Thread.interrupted()` (Static Method):** Checks the *current* thread's interrupt status flag and **clears** it (resets it to `false`).
 
-*Thread.isInterrupted() is an instance method to check whether the thread is interrupted or not.*
+| Method | Type | Purpose | Modifies Flag? |
+| :--- | :--- | :--- | :--- |
+| `isInterrupted()` | Instance | Queries if the target thread has been interrupted. | **No** |
+| `Thread.interrupted()` | Static | Queries if the current thread has been interrupted and clears the status. | **Yes** (resets to `false`) |
 
-*Thread.interrupted() is a static method which when invoked clears the interrupt status flag of the current running thread.*
+---
 
-Now let’s have a look at the second way of handling the interrupts. What if we don’t call the methods that throw InterruptedException in our programs. Let us look at the below code.
+### 2. Checking the Interrupted Status Flag
+
+If a thread is executing a long-running, non-blocking CPU loop, it will never throw an `InterruptedException`. Instead, the thread must periodically check its own interrupt status flag:
 
 ```java
-public class StoppingThreadWithInterrupt
-extends Thread {
-
-
+public class StoppingThreadWithInterrupt2 extends Thread {
+    @Override
     public void run() {
         System.out.print(Thread.currentThread().getName() + ": I am doing work ");
-        while (!Thread.currentThread().isInterrupted()) {
+        while (!Thread.currentThread().isInterrupted()) { // Periodically check the flag
             System.out.print(". ");
         }
         System.out.println(Thread.currentThread().getName() + ": I have been interrupted!!");
         System.out.println("End of the thread: " + Thread.currentThread().getName() + "!");
     }
 
-
     public static void main(String[] args) throws InterruptedException {
-        Thread t
-= new StoppingThreadWithInterrupt2();
+        Thread t1 = new StoppingThreadWithInterrupt2();
         t1.start();
-        Thread.sleep(10); // Let T
-do some work.
-        t1.interrupt(); // Interrupt T
-Thread.sleep(1000); // Let T
-comes to an End
+        Thread.sleep(10); // Let t1 do some work
+        t1.interrupt(); // Interrupt t1
+        Thread.sleep(1000); // Let t1 come to an end
         System.out.println("End of the thread: " + Thread.currentThread().getName() + "!");
     }
-
-
 }
 ```
 
-hosted with ❤ by 
-
-Illustration 11.2 Stopping Threads Gracefully using Interrupts
-
-The main change that you can observe between the above program and the previous one is, we just removed Thread.sleep(), the try-catch around it and the condition of the while loop checking whether the thread is interrupted or not. And here is the output of the above program.
-
-Thread-0: I am doing work . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . Thread-0: I have been interrupted!!
+**Output:**
+```text
+Thread-0: I am doing work . . . . . . . . . . . . . . . . . . . . . . . . .
+Thread-0: I have been interrupted!!
 End of the thread: Thread-0!
 End of the thread: main!
+```
 
-In the above program, themain thread sleeps for 10 milliseconds and then interrupts the thread t1. When t1 finds that it is interrupted it comes out of the while loop because the condition fails.
+When `t1` detects that its interrupt flag is set, it naturally exits the `while` loop, allowing clean termination.
 
-Why can’t we use the same condition !Thread.currentThread.isInterrupted() and remove the break statement(at line 11 in Illustration 11.1) in the catch block. We can definitely use it. But there is a catch. Let’s try and modify the program in Illustration 11.1 and run it to understand it better.
+---
+
+> **Pitfall: Flag Clearing by Blocking Methods**
+> The built-in interrupt handlers for blocking methods (like `sleep`, `wait`, `join`) **clear** the interrupt status flag before throwing an `InterruptedException`. If you catch the exception but do not re-set the flag or break the loop, the thread will run infinitely because its status has been reset.
+
+Consider this incorrect implementation:
 
 ```java
-public class StoppingThreadWithInterrupt
-extends Thread {
-
-
+public class StoppingThreadWithInterrupt3 extends Thread {
+    @Override
     public void run() {
         System.out.print(Thread.currentThread().getName() + ": I am doing work ");
         while (!Thread.currentThread().isInterrupted()) {
@@ -125,63 +137,43 @@ extends Thread {
             try {
                 Thread.sleep(1000);
             } catch (InterruptedException e) {
+                // Pitfall: The flag is cleared! isInterrupted() will return false.
                 System.out.println("\n" + Thread.currentThread().getName() + ": I have been Interrupted!!");
             }
         }
         System.out.println("End of the thread: " + Thread.currentThread().getName() + "!");
     }
 
-
     public static void main(String[] args) throws InterruptedException {
-        Thread t
-= new StoppingThreadWithInterrupt3();
+        Thread t1 = new StoppingThreadWithInterrupt3();
         t1.start();
         Thread.sleep(5000);
         t1.interrupt();
         Thread.sleep(1000);
         System.out.println("End of the thread: " + Thread.currentThread().getName() + "!");
     }
-    
 }
 ```
 
-hosted with ❤ by 
-
-Illustration 11.3 Stopping the thread with interrupts
-
-Run it in your system and check whether the thread program stops or not. In specific, check whether the thread t1 completes or not. Check the output below.
-
+**Output:**
+```text
 Thread-0: I am doing work . . . . .
 Thread-0: I have been Interrupted!!
-        . End of the thread: main!
-        . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
-. . . . . . . . 
+. End of the thread: main!
+. . . . . . . . . . . . . . . (runs infinitely)
+```
 
-The thing is, it won’t be complete. It runs infinitely. Why?
+Because `InterruptedException` cleared the flag, the loop condition `!Thread.currentThread().isInterrupted()` remains `true` forever.
 
-Well, the trick lies in built-in interrupt handlers — for all the methods that throw theInterruptedException. They clear the interrupt status flag.
+---
 
-****Very Important Note: The built-in interrupt handlers for the methods that throws InterruptedException will clear the interrupt status flag. So by the time the control comes into the catch block of InterruptedException the interrupt status flag will already have been cleared.*
+### The Right Way: Self-Interruption
 
-So by the time the execution comes into the catch block, the interrupt status flag will already have been cleared. And the condition in the while loop will always be true. Because the isInterrupted() instance method just checks whether the flag is set or not.
-
-So, what can be done here? Again, it depends on what we need and what our required behavior is. But in our case, we have two simple ways of fixing this.
-
-First, We can simply set the interrupt status flag by invoking interrupt() instance method like this; Thread.currentThread().interrupt() in the catch block(ideally as a first statement in the catch block), so that, when the control comes to while loop condition it checks that the thread is interrupted and comes out of the loop.
-
-Second, we can just simply use thebreak statement as a final statement in the catch block so that it breaks the while loop and comes out.
-
-Either of the above two is fine. But I would upvote for the first approach. Because using break may not work if we nested loops as it only comes out of the inner loop. Hope you understand what I am trying to say.
-
-So the below program is the complete program and a very safer way to stop the thread using interrupts.
+To fix this issue without using a `break` (which might fail in nested loops), you should **re-interrupt the thread** inside the `catch` block. This restores the interrupt status flag so that the outer loops can detect it:
 
 ```java
-
-
-public class StoppingThreadWithInterrupt
-extends Thread {
-
-
+public class StoppingThreadWithInterrupt4 extends Thread {
+    @Override
     public void run() {
         System.out.print(Thread.currentThread().getName() + ": I am doing work ");
         while (!Thread.currentThread().isInterrupted()) {
@@ -190,17 +182,15 @@ extends Thread {
                 Thread.sleep(1000);
             } catch (InterruptedException e) {
                 System.out.println("\n" + Thread.currentThread().getName() + " is Interrupted? " + Thread.currentThread().isInterrupted());
-                Thread.currentThread().interrupt(); // Sets the interrupt flag
+                Thread.currentThread().interrupt(); // Restore the flag!
                 System.out.println(Thread.currentThread().getName() + ": I have been Interrupted!!");
             }
         }
         System.out.println("End of the thread: " + Thread.currentThread().getName() + "!");
     }
 
-
     public static void main(String[] args) throws InterruptedException {
-        Thread t
-= new StoppingThreadWithInterrupt4();
+        Thread t1 = new StoppingThreadWithInterrupt4();
         t1.start();
         Thread.sleep(5000);
         t1.interrupt();
@@ -210,28 +200,21 @@ extends Thread {
 }
 ```
 
-hosted with ❤ by 
-
-Illustration 11.4 Stopping the thread — The safer way with interrupts
-
-You can notice at line 11 of the above program we have printed the interrupt status flag just to prove to you that it is cleared by the built-in interrupt handler. You can check the below output which is highlighted in the ***bold-italic ***font. And at line 12 we used Thread.currentThread().interrupt() to set the interrupt status flag again as it has been cleared by the built-in interrupt handler.
-
+**Output:**
+```text
 Thread-0: I am doing work . . . . .
-***Thread-0 is Interrupted? false***
+Thread-0 is Interrupted? false
 Thread-0: I have been Interrupted!!
 End of the thread: Thread-0!
 End of the thread: main!
+```
 
-So far we have seen two ways of handling interrupts: The one with the InterruptedException and other without it. But what if we don’t provide any interrupt handler? Well, in Java, there are NO default interrupt handlers. When a thread, say T1, interrupts another thread, say T2, and if T2 doesn’t provide the interrupt handler, then nothing happens. The interrupts will simply be ignored.
+---
 
 ## Summary
 
-An *interrupt* is an indication to a thread that it should stop what it is doing and do something else.
-
-It’s up to the programmer to decide exactly how a thread responds to an interrupt, but it is very common for the thread to terminate.
-
-A thread sends an interrupt by invoking  on the Thread object for the thread to be interrupted.
-
-For the interrupt mechanism to work correctly, the interrupted thread should implement an interrupt handler otherwise the interrupt will simply be ignored.
-
-The methods that throw theInterruptedException have built-in interrupt handler. These built-in handlers simply clear the interrupt status flag and then throws the InterruptedException in some or the other way.
+*   **Collaborative Mechanism:** Interruption is cooperative. A thread asks another to stop by calling `interrupt()`, but the target thread must implement logic to support it.
+*   **Interrupt Flag:** Calling `interrupt()` sets the thread's internal interrupt status flag.
+*   **Checking Flag:** Use the instance method `isInterrupted()` to check the flag. Use the static method `Thread.interrupted()` to check and clear the flag of the current thread.
+*   **Flag Clearing:** Blocking methods (like `sleep()`) clear the flag before throwing `InterruptedException`.
+*   **Safer Stopping:** To stop a thread safely when catching `InterruptedException`, either break the loop or call `Thread.currentThread().interrupt()` to restore the flag.

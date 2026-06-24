@@ -1,33 +1,27 @@
-# NO Guarantee on the order of execution of threads and the join() method
+# NO Guarantee on the Order of Execution of Threads and the join() Method
 
-In , we have seen that we can create multiple threads giving the same Runnable. Here we look at the same example and understand the order of their execution.
+In the previous module, we have seen that we can create multiple threads sharing the same `Runnable` instance. Here, we look at the same example and understand the order of their execution.
 
 ```java
 public class MultipleThreadSameRunnableDemo {
-
-
     public static void main(String[] args) {
         MyRunnable task = new MyRunnable();
-        Thread t
-= new Thread(task, "t1");
-        Thread t
-= new Thread(task, "t2");
-        Thread t
-= new Thread(task, "t3");
+        
+        // Creating three threads sharing the same task
+        Thread t1 = new Thread(task, "t1");
+        Thread t2 = new Thread(task, "t2");
+        Thread t3 = new Thread(task, "t3");
+        
         t1.start();
         t2.start();
         t3.start();
     }
 
-
     private static void methodOne() {
         System.out.println("In Method One");
     }
 
-
     static class MyRunnable implements Runnable {
-
-
         @Override
         public void run() {
             for (int i = 0; i < 10; i++) {
@@ -38,74 +32,71 @@ public class MultipleThreadSameRunnableDemo {
 }
 ```
 
-hosted with ❤ by 
+The above code creates a single `Runnable` instance and three `Thread` instances. All three `Thread` instances get the same `Runnable` instance, and each thread is given a unique name: `t1`, `t2`, and `t3`. Finally, all three threads are started by invoking `start()` on those three instances.
 
-Three threads t1, t2, and t3 having the same runnable.
+Run this program multiple times, and you won’t see the same output every time. You may or may not get the same output every time you run the program. One thumb rule about threads in Java is that the **order of their execution is NOT guaranteed**.
 
-The above code creates a single Runnable instance and three Thread instances. All three Thread instances get the same Runnable instance, and each thread is given a unique name: t1, t2, and t3. Finally, all three threads are started by invoking start() on those three instances.
+---
 
-Run this program multiple times, and you won’t see the same output every time. Let me rephrase. You may or may not get the same output every time you run the program. One thumb rule about threads in Java is that the order of their execution is NOT guaranteed.
+## Key Rules of Thread Execution
 
-Here are the few points that are to be noted.
+Here are the key points that must be noted:
+1.  **Single Start Limit:** Each thread will start and complete. Once a thread has been started, it can never be started again. We will get `IllegalThreadStateException` if we call `start()` again on the same thread instance.
+2.  **No Guarantee of Start Order:** Though we started `t1` first, followed by `t2` and `t3`, there is no guarantee that `t1` will ever run first. It is all up to the JVM Thread Scheduler and it varies from JVM to JVM.
+3.  **No Guarantee of Execution Continuity:** Once a thread is started, there is no guarantee that it will keep executing till it’s completed. We will never know when it interleaves the CPU core. Again, this depends on the scheduler. We all know about this pretty well from our academic operating system concepts.
+4.  **Mixing Event Streams:** Within each thread, the execution happens in a predictable order. But the events of different threads can mix in unpredictable ways. That is why if we run the program multiple times or on multiple machines, we may see different outputs.
+5.  **No Clear Pattern:** There is no clear pattern in the order of their execution.
+6.  **Thread Death and Stack Clean-up:** When a thread completes its `run()` method, the thread dies and the stack for that thread is removed from JVM’s memory.
 
-Each thread will start and complete. Once a thread has been started, it can never be started again. We will get IllegalThreadStateException if we call start() again on the same thread instance.
+Let's look at the sample output to understand the unpredictable mixing of event streams:
 
-Though we started t1 first, followed by t2 and t3, there is no guarantee that t1 will ever run first. It is all up to the JVM Thread Scheduler and it varies from JVM to JVM.
+```text
+From t2 :: 3
+From t1 :: 3
+From t2 :: 4
+From t1 :: 4
+From t2 :: 5
+From t1 :: 5
+From t2 :: 6
+From t1 :: 6
+From t2 :: 7
+From t1 :: 7
+From t2 :: 8
+From t1 :: 8
+From t2 :: 9
+```
 
-Once a thread is started, there is NO guarantee that it will keep executing till it’s completed. We will never know when it interleaves the CPU core. Again, this depends on the scheduler. We all know about this pretty well, right? We all learned it in our academic subject — Operating Systems.
+Focus on the output from `t1`. Within `t1` alone, the execution order is perfectly predictable (0, 1, 2, 3... 9). But the way `t1`, `t2`, and `t3` are getting preempted by the OS is not predictable. If you run it again, you may see a completely different output, such as:
 
-Within each thread, the execution happens in a predictable order. But the events of different threads can mix in unpredictable ways. That is why if we run the program multiple times or on multiple machines, we may see different outputs.
+```text
+From t1 :: 0
+From t1 :: 1
+From t1 :: 2
+From t1 :: 3
+From t1 :: 4
+From t1 :: 5
+From t1 :: 6
+From t1 :: 7
+From t1 :: 8
+From t1 :: 9
+From t3 :: 0
+From t3 :: 1
+From t3 :: 2
+From t3 :: 3
+```
 
-There is no clear pattern in the order of their execution.
+---
 
-When a thread completes its run() method, the thread dies and the stack for that thread is removed from JVM’s memory.
+> **Pitfall: IllegalThreadStateException**
+> Once a thread completes its execution and enters the `TERMINATED` state, it is dead. You cannot reuse the same `Thread` object to start the thread again. Invoking `start()` a second time on the same instance will throw an `IllegalThreadStateException`.
 
-The 4th point above is the important point to be understood. To understand this better, let's look at the sample output.
+---
 
-*From t2 :: 3**
-****From t1 :: 3****
-From t2 :: 4**
-****From t1 :: 4****
-From t2 :: 5**
-****From t1 :: 5****
-From t2 :: 6**
-****From t1 :: 6****
-From t2 :: 7**
-****From t1 :: 7****
-From t2 :: 8**
-****From t1 :: 8****
-From t2 :: 9*
+## Coordinating Thread Execution with join()
 
-Focus on the output fromt1. The execution order is predictable. But the way t1, t2 and t3 are getting preempted is not predictable. Here in this output, there seems to be a pattern of how they are getting executed but it will not always be the case. If you run it again, you may not see the same output. Here is the sample output of the second run.
+What if you want to enforce execution order? There is a way to tell the currently running thread not to run until some other thread has finished: the `join()` method.
 
-***From t1 :: 0****
-****From t1 :: 1****
-****From t1 :: 2****
-****From t1 :: 3******
-From t1 :: 4******
-From t1 :: 5******
-From t1 :: 6******
-From t1 :: 7******
-From t1 :: 8******
-From t1 :: 9******
-****From t3 :: 0**
-From t3 :: 1**
-From t3 :: 2**
-From t3 :: 3*
-
-Hope you got it now.
-
-*Thread execution order is NOT guaranteed.*
-
-So all the story boils down to a single statement that the behavior is NOT guaranteed.
-
-But …
-
-There is a way to tell a thread not to run until some other thread has finished — the join() method.
-
-## join()
-
-join() is a non-static method in the classThread. It lets the current thread join onto the end of the other thread. Look at the following code snippet.
+The `join()` method is a non-static method in the `Thread` class. It lets the current thread join onto the end of another thread.
 
 ```java
 Thread tj = new Thread();
@@ -113,47 +104,52 @@ tj.start();
 tj.join();
 ```
 
-This code takes the current thread and joins it to the end of the thread referenced by tj. This means if we assume that this code is running in themain thread inside themain() method, then the main thread will be blocked and won’t become runnable until the thread tj finishes its run() method. There is another flavor of join() that takes milliseconds to wait.
+This code takes the current thread and joins it to the end of the thread referenced by `tj`. This means if this code is running in the **main thread** inside the `main()` method, then the **main thread** will be blocked and won't become runnable until the thread `tj` finishes its `run()` method. 
 
-tj.join(2000) // The overloaded method
+There is also an overloaded version of `join()` that takes a timeout:
 
-This says the current thread which is main, wait until tj is completed, but if it takes longer than 5000 milliseconds, then stop waiting and then become runnable.
+```java
+tj.join(2000); // The overloaded method
+```
 
-Now, what is the exact state of the main thread while tj is running? Well, it depends on the flavor of join() method we are using.
+This tells the current thread (e.g., `main`) to wait until `tj` is completed, but if it takes longer than 2000 milliseconds, stop waiting and resume execution.
 
-***join()***: will put the current thread into WAITING state.
+---
 
-***join(long milliseconds)***: will put the current thread into TIMED_WAITING state.
+> **Mental Model: Thread Join**
+> Think of a thread calling `t.join()` as a manager waiting for a subordinate to finish a report. The manager (calling thread) pauses all their work and sits idle (goes into `WAITING` or `TIMED_WAITING` state) until the subordinate (thread `t`) completes their report (finishes its task). Only then does the manager resume working.
 
-Now that we understand how join() works let's look at a small example to understand it better.
+---
 
-What we want to achieve is, thread t1 should print 0–9 and main should print 0–5 but only after t1 completes.
+> **Insight: Thread States during join()**
+> The state of the calling thread during a `join()` call depends on the overload used:
+> *   **`join()`**: Will put the calling thread into the **`WAITING`** state.
+> *   **`join(long milliseconds)`**: Will put the calling thread into the **`TIMED_WAITING`** state.
+
+---
+
+### Example: Enforcing Order with join()
+Suppose we want to achieve the following: thread `t1` should print 0–9, and the `main` thread should print 0–4 *only* after `t1` completes.
 
 ```java
 package org.vit.threads;
 
-
 public class ThreadStackDemo {
-
-
     public static void main(String[] args) throws InterruptedException {
         MyRunnable task = new MyRunnable();
-        Thread t
-= new Thread(task, "t1");
+        Thread t1 = new Thread(task, "t1");
+        
         t1.start();
-        t1.join();
-        for (int i =
-; i <
-; i++ ){
+        t1.join(); // main thread waits here until t1 completes
+        
+        for (int i = 0; i < 5; i++) {
             System.out.println("From " + Thread.currentThread().getName() + ":: " + i);
         }
     }
 
-
     private static void methodOne() {
         System.out.println("In Method One");
     }
-
 
     static class MyRunnable implements Runnable {
         @Override
@@ -166,10 +162,8 @@ public class ThreadStackDemo {
 }
 ```
 
-hosted with ❤ by 
-
-Sample Output:
-
+**Output:**
+```text
 From t1 :: 0
 From t1 :: 1
 From t1 :: 2
@@ -185,19 +179,16 @@ From main:: 1
 From main:: 2
 From main:: 3
 From main:: 4
+```
 
-No matter, how many times we run it, we always get the same output. Because we made it so.
+No matter how many times you run this program, you will always get this exact output because we have explicitly synchronized the threads using `join()`.
+
+---
 
 ## Summary
 
-A thread can only be started once. Starting a thread that is already started and completed results in IllegalThreadStateException
-
-We cannot guarantee the order of how threads are interleaved. It all depends on the Thread Scheduler.
-
-Once a thread is started, there is NO guarantee that it will keep executing till it’s completed. Within each thread, the execution happens in a predictable order. But the events of different threads can mix in unpredictable ways.
-
-When a thread completes its run() method, the thread dies and the stack for that thread is removed from JVM’s memory.
-
-Using the join() method, we can tell the current thread not to run until some other thread has finished. or We can also tell to wait for a specific amount of time using the other flavor of method — join(long milliseconds)
-
-When we use plain join() the current thread’s state changes to WAITING. And using the join(long milliseconds), changes the current thread’s state to TIMED_WAITING.
+*   **No Order Guarantee:** The order in which threads are scheduled and executed is completely unpredictable and depends entirely on the OS Thread Scheduler.
+*   **One-Time Start:** A thread can only be started once. Attempting to restart a terminated thread throws an `IllegalThreadStateException`.
+*   **Interleaved Execution:** Once started, a thread can be preempted at any moment. Threads run concurrently and their instruction streams interleave unpredictably.
+*   **Thread Join:** The `join()` method forces the calling thread to pause until the target thread terminates, transitioning the caller to the `WAITING` state.
+*   **Timed Join:** The `join(long milliseconds)` method pauses the caller for at most the specified duration, transitioning the caller to the `TIMED_WAITING` state.

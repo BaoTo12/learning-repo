@@ -1,72 +1,151 @@
-# Introduction to non-blocking — Compare and Swap
+# Introduction to Non-Blocking Concurrency — Compare-And-Swap (CAS)
 
-We have seen the CopyOnWriteArrayList in the previous . In this part, we will look at ConcurrentHashMap which is yet another beast in terms of understanding what is happening behind the scenes. But before that, we need to understand what CAS(Compare-And-Swap) is. We will dedicate this article solely to *CASing*. In the next part, we will have an in-depth understanding of putVal() method which is commonly used by all the put variants: put, putIfAbsent, putAll and etc.
+In the previous module, we explored the `CopyOnWriteArrayList` and saw how it achieves thread safety by copying its underlying array on every write. In this module, we will explore a foundational concept that powers many high-performance concurrent collections (such as `ConcurrentHashMap` and the `Atomic` variables): **Compare-And-Swap (CAS)**.
 
-## Compare-And-Swap
+Understanding CAS is essential for grasping how Java's concurrency framework achieves thread safety without the overhead of traditional thread blocking and locks.
 
-compare-and-swap is a technique or a tool used in multithreading to provide non-blocking thread safety. So far what we have seen with synchronized and ReentrantLock, are the blocking mechanisms. This CAS technique is even implemented at the hardware level right into the machine’s Instruction Set. For example, in the Intel x-86, it is implemented as **CMPXCHG **(compare-and-exchange) instruction. All the modern multiprocessor architectures support CAS in their instruction set. It is the most popular primitive for implementing non-blocking concurrent collections. Most of the concurrent collections in Java use CAS in combination with minimal locking(_Lock Striping_) to achieve a higher degree of concurrency.
+---
 
-To understand how CAS works, consider our Counter scenario, where we have two threads T1 and T2 and both are trying to increment the value of the Counter object. We know that the increment operation is NOT atomic. It actually divides into three atomic operations: READ, INCREMENT, and WRITE. And it is at the WRITE operation the CAS comes into the picture.
+## What is Compare-And-Swap?
 
-Let's assume that the value of the counter is now 10, and below is the execution sequence of the threads.
+**Compare-And-Swap (CAS)** is an optimistic, non-blocking technique used in multithreading to achieve thread-safe state updates. 
 
-T1 comes and does the *READ* and *INCREMENT* operations. So it has 11 in its local stack, but not yet written back to the memory location referenced by the counter variable.
+Traditional synchronization mechanisms—like the `synchronized` keyword and `ReentrantLock`—are **blocking (pessimistic) mechanisms**. They assume that conflict is highly likely, so they block competing threads until the lock holder releases it. While safe, blocking incurs significant overhead due to thread context switches, scheduling delays, and lock acquisition costs.
 
-Now T2 also same. It comes and reads the value as 10 and then increments it to 11 caches it in its local stack, but not yet written back to the memory location referenced by the counter variable.
+In contrast, CAS is a **non-blocking (optimistic) mechanism**. It assumes that conflicts are rare, so it allows threads to attempt updates without acquiring a lock. If a conflict occurs, the thread simply retries the operation until it succeeds.
 
-Now T1 comes and performs the CAS operation. The CAS operation accepts three values: expectedValue, newValue, and MemoryAddress in which the value needs to be updated. In our case …
-****\***** the **expectedValue** is 10 which T1 read and it expects the same value to be in the memory location — That means no other thread has updated it meanwhile.
-****\***** the **newValue** is 11 which is after T1 incremented in its local stack but has not yet been written to the memory location.
-****\***** the **MemoryAddress** is the location to be updated — In our case it is the counter variable.
-Now when T1 performs CAS operation, it first checks whether the given expectedValue matches with the actual value from the memory location that it is updating. If both are the same, that means, no other thread modified the value. So it modifies the contents of that memory location to a new given value. All this is done as a single atomic operation. The underlying native code and then the further hardware instructions ensure this. In this case, assume that T1 has been successful in the CAS operation and as a result, the counter value has now become 11.
+### Hardware-Level Support
+CAS is not implemented in software; it is a fundamental hardware-level primitive. Modern CPU architectures support CAS directly within their instruction sets. 
+- In the Intel x86 architecture, it is implemented as the **`CMPXCHG`** (Compare-and-Exchange) instruction.
+- By executing at the hardware level, CAS operations are guaranteed to be single, atomic instructions, executed in a fraction of the time required to acquire a software lock.
 
-Now T2 comes from point-2, and performs the CAS operation.
-**\*\*** ***Now T2 has the expectedValue as 10 which is the old value. Note that T2 has not yet seen the value updated by T1. It is still looking at the old cached value in its own stack.
-*** T2 has the newValue as 11. When CAS operation compares the expectedValue and the actual value from the memory location of the variable, it finds that both are not the same. This indicates T2 that some other thread has changed the value. In our case, T1 has updated this value to 11 a while ago. This is where the CAS operation fails without updating the value. When this happens, T2 has to take the updated value and repeat the same operation again until it is successful. So now T2 reads the value 11, which is now the expectedValue, increments it to 12, which is the newValue to be updated, and performs the CAS. Eventually, the T2’s CAS operation will be successful, and as a result, the counter value will be updated to 12.
+---
 
-The CAS operation also tells us whether or not the operation has been successful. In high-level languages like Java, this returns a boolean value indicating the success or failure of the operation: true means success, and false means failure. Remember, it is the programmer's responsibility to continue retrying the CAS operation in a loop until successful as the underlying instruction doesn’t ensure that the operation will be successful. It only gives us the result: true or false. In case of false the program needs to retry the CAS operation.
+## How Compare-And-Swap Works
 
-JVM doesn’t have any byte code to perform the CAS. It relies on native code support. The sun.misc.Unsafe class provides API to perform CAS and also to do other atomic operations. We will see this in a separate article in depth. Stay Tuned. But just to give you a glimpse of it, here is a simple API of CAS from sun.misc.Unsafe.
+To understand the mechanics of CAS, let's look at a classic counter increment scenario. Suppose we have a shared `Counter` object, and two threads, **T1** and **T2**, want to increment its value.
+
+We know that a simple increment operation (`value++`) is not atomic; it consists of three distinct steps:
+1.  **READ**: Read the current value from memory.
+2.  **MODIFY**: Increment the value in the thread's local stack.
+3.  **WRITE**: Write the incremented value back to memory.
+
+Let's assume the current value of the counter in main memory is **10**, and trace the execution of **T1** and **T2**:
+
+1.  **T1** reads the value **10** and increments it to **11** in its local execution stack. It has not yet written the value back to memory.
+2.  **T2** also reads the value **10** and increments it to **11** in its local stack.
+3.  **T1** is the first to attempt to write back to memory using a CAS operation.
+
+> **Mental Model: The CAS Arguments**
+> A CAS operation accepts three primary arguments:
+> - **Memory Address ($V$)**: The location of the variable to be updated (e.g., the address of our counter variable).
+> - **Expected Value ($A$)**: The value the thread expects to find at that memory location (the value it originally read).
+> - **New Value ($B$)**: The new value the thread wishes to write to the memory location.
+> 
+> The CPU will atomically compare the value at $V$ with $A$.
+> - If the current value at $V$ equals $A$, no other thread has modified the variable. The CPU writes $B$ to $V$ and returns `true`.
+> - If the current value at $V$ does not equal $A$, another thread has modified the variable. The write fails, the memory remains untouched, and the CPU returns `false`.
+
+### Tracing the Write Operations
+
+#### 1. Thread T1's CAS Attempt
+- **Memory Address**: Address of `counter`
+- **Expected Value**: 10
+- **New Value**: 11
+
+The CPU checks the memory address of the counter. The current value is indeed 10 (matching the expected value). The CPU atomically updates the counter to **11** and returns `true`. **T1**'s update is successful.
+
+#### 2. Thread T2's CAS Attempt
+- **Memory Address**: Address of `counter`
+- **Expected Value**: 10
+- **New Value**: 11
+
+The CPU checks the memory address of the counter. The current value is now **11** (since **T1** just updated it), but **T2** expects **10**. Because the current value does not match the expected value, the CPU rejects the write, leaves the memory untouched, and returns `false`.
+
+#### 3. Thread T2's Retry (Spinning)
+Because its write failed, **T2** must retry the operation:
+1.  **Read**: **T2** reads the new current value **11** from memory.
+2.  **Modify**: **T2** increments the value to **12** in its local stack.
+3.  **Write (CAS)**: **T2** performs a new CAS operation:
+    - **Expected Value**: 11
+    - **New Value**: 12
+
+This time, if no other thread has modified the counter, the memory value matches **11**. The CPU atomically updates the counter to **12** and returns `true`. **T2**'s update is now successful.
+
+---
+
+## CAS implementation in Java: sun.misc.Unsafe
+
+Because Java bytecode does not have direct support for hardware-level CAS, the JVM delegates these operations to native code. The low-level class **`sun.misc.Unsafe`** provides the gateway to these native hardware instructions.
+
+Here is a typical CAS method signature from `sun.misc.Unsafe`:
 
 ```java
-public final boolean compareAndSwapInt(Object o, long offset,
-                                       int expected,
-                                       int x) {
-    return *theInternalUnsafe*.compareAndSetInt(
-                                 o, offset, expected, x);
+public final boolean compareAndSwapInt(Object o, long offset, int expected, int x) {
+    return theInternalUnsafe.compareAndSetInt(o, offset, expected, x);
 }
 ```
 
-![alt text](../images/image12.png)
-The below pseudo-code shows how to implement the thread-safety with CAS. In fact, this is what all AtomicXXX classes are doing. We will look at them in-depth in later parts. The important thing to remember is that the variables that are participating in CAS must be volatile. In the below example, counter.getValue() should always give the latest updated value. It should be a volatile variable so that value is directly read from memory location rather than from the cache.
+*Figure 17.2.1: Native CAS signature in sun.misc.Unsafe*
+
+*   **`o`**: The target object containing the field we want to update.
+*   **`offset`**: The memory offset of the field within the object `o` (which acts as the memory address).
+*   **`expected`**: The value we expect the field to have.
+*   **`x`**: The new value we want to write if the expected value matches.
+
+Below is an illustration of how CAS maps to memory and registers during execution:
+
+![CAS Memory Mapping](../images/image12.png)
+
+*Figure 17.2.2: Visual representation of a Compare-And-Swap execution cycle*
+
+---
+
+## Implementing a Lock-Free Counter
+
+To implement thread safety using CAS, we must run the CAS operation inside a loop (often called a **spin loop** or **retry loop**) until it returns `true`. 
+
+Additionally, the variable participating in the CAS operation **must be declared `volatile`**. This ensures that any update made by one thread is immediately visible to all other threads, preventing them from reading stale expected values.
+
+Here is the pseudocode for a lock-free, thread-safe counter using a CAS loop:
 
 ```java
-public int increment() {
-    do {
-        int expectedValue = counter.getValue();*
-        *int newValue = expectedValue + 1;
-        boolean success = CAS(expectedValue, newValue, counter);
-    } while(!success)
-    return newValue;
+public class LockFreeCounter {
+    private volatile int value = 0;
+
+    public int getValue() {
+        return value;
+    }
+
+    public int increment() {
+        boolean success;
+        int expectedValue;
+        int newValue;
+        
+        do {
+            expectedValue = getValue(); // Read the volatile value
+            newValue = expectedValue + 1; // Calculate the new value
+            
+            // Perform the atomic CAS operation
+            success = CAS(expectedValue, newValue, this); 
+        } while (!success); // Retry if another thread modified the value first
+        
+        return newValue;
+    }
 }
 ```
 
-If you just look carefully at what we said till now, nowhere did we mention the locks or monitors to provide the thread safety. So, the CAS, in a way, lets us implement the *lock-free* algorithms. You can see in the above pseudo-code, we haven’t used locks anywhere. This is called *non-blocking*. We can implement *non-blocking* or *lock-free* algorithms using CAS. The AtomicInteger, AtomicLong, AtomicDouble, and all AtomicXXX classes use this feature extensively(more in-depth coverage in later parts). The ConcurrentHashMap also uses this strategy to implement non-blocking put operations which we will discuss in the next part.
+By avoiding locks and monitors, this algorithm is completely **non-blocking** and **lock-free**. If a thread is suspended mid-execution, it does not prevent other threads from making progress. 
+
+The `java.util.concurrent.atomic` package (containing `AtomicInteger`, `AtomicLong`, `AtomicBoolean`, etc.) uses this exact strategy under the hood to provide high-performance, lock-free operations.
+
+---
 
 ## Summary
 
-compare-and-swap is a technique used in multithreading to implement non-blocking thread safety.
-
-The modern multiprocessor architectures support CAS in their instruction set.
-
-Most of the concurrent collections in Java use CAS in combination with minimal locking(_Lock Striping_) to achieve a higher degree of concurrency.
-
-The CAS operation is an atomic operation. This atomicity is ensured by the native code and further down, the hardware instructions.
-
-The CAS operation accepts three values: expectedValue, newValue, and MemoryAddress in which the value needs to be updated.
-
-CAS operation first checks whether the expectedValue is equal to the original value in the specified MemoryAddress. If yes, it updates the value at the MemeoryAddress with the specified newValue and returns with boolean true. If not, it just simply returns false without updating the value.
-
-It is the programmer’s responsibility to continue retrying the CAS operation in a loop until successful as the underlying instruction doesn’t ensure that the operation will be successful.
-
-CAS lets us implement *lock-free* or *non-blocking* algorithms. The AtomicInteger, AtomicLong, AtomicDouble, and all AtomicXXX classes use this feature extensively. The ConcurrentHashMap also uses this strategy to implement non-blocking put operations.
+*   **Compare-And-Swap (CAS)**: An optimistic, non-blocking hardware-level instruction used to update a shared variable atomically.
+*   **Hardware Primitives**: Implemented directly in hardware (e.g., `CMPXCHG` in Intel CPUs), making it extremely fast compared to software-based locking.
+*   **Three Arguments**: A CAS operation takes a target memory address, an expected value, and a new value. It only writes the new value if the current memory value matches the expected value.
+*   **Retry Loop**: When a CAS operation fails (returns `false`), the calling thread does not block. Instead, it enters a retry loop, reads the updated value, and tries again until it succeeds.
+*   **Volatiles are Mandatory**: Variables updated via CAS must be declared `volatile` to guarantee immediate visibility of updates across threads, preventing stale comparisons.
+*   **Lock-Free Algorithms**: CAS enables the design of lock-free, non-blocking collections (like `ConcurrentHashMap` and atomic variables) that maximize CPU utilization and scale exceptionally well under high concurrency.

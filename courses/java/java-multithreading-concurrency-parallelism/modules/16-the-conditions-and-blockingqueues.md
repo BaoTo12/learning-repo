@@ -1,57 +1,78 @@
 # The Conditions and BlockingQueues
 
-In the previous , we have seen the ReentrantLock with and without fairness and compared their performances. In this part, we will see a key concept that is used in conjunction with ReentrantLocks to implement the BlockingQueues — The Conditions.
+In the previous modules, we explored the `ReentrantLock` with and without fairness and compared their performance under different concurrency levels. In this module, we will examine a key concept that is used in conjunction with `ReentrantLock` to implement thread-safe blocking collections: the **Condition** object.
 
-First, we understand what a BlockingQueue is in the java concurrency framework, look at several implementations, understand what theCondition object is, and finally implement our own BlockingQueue.
+We will first understand what a **BlockingQueue** is in the Java Concurrency Utilities, look at several standard JDK implementations, explore the underlying mechanics of the **Condition** object, and finally implement our own custom `BlockingQueue` from scratch.
 
-A BlockingQueue is a type of shared collection that is used to exchange data between two or more threads while causing one or more of the threads to wait/block until the point in time when the data can be exchanged. Typically this kind of blocking happens with *bouned buffers*. We will use these kinds of collections to implement the Producer-Consumer patterns. Remember we implemented the *bounded buffers* with synchronized, wait & notify in , where one thread produces data, then adds it to a queue, and another thread consumes the data from the queue. A queue provides the means for the producer and the consumer to exchange objects. The java.util.concurrent package provides several BlockingQueue implementations that can be classified as two types:
+---
 
-**Bounded Queues**
-■ ArrayBlockingQueue
-■ LinkedBlockingDeque
-■ LinkedBlockingQueue
-■ PriorityBlockingQueue
+## What is a BlockingQueue?
 
-**Special-Purpose Queues**
-■ SynchronousQueue
-■ DelayQueue
-■ LinkedTransferQueue
+A **BlockingQueue** is a type of thread-safe, shared collection used to exchange data between producer and consumer threads. It causes threads to block or wait until the queue is in a state where the requested operation (inserting or retrieving an element) can be safely performed.
 
-We will only look at Bound-Queues in this part. Each of the above queues has a general behavior. The methods put() and take() cause the calling thread to be blocked; with put() the thread is blocked if the buffer(or the collection in-specific) is full and with take() if the buffer is empty. We can implement producer-consumer patterns with these collection classes very easily as below.
+> **Mental Model: Bounded Buffers**
+> A **bounded buffer** is a queue with a fixed capacity limit. 
+> - If a producer thread tries to add an element to a full buffer, it must block until space becomes available.
+> - If a consumer thread tries to take an element from an empty buffer, it must block until an element is produced.
+> This forms the foundation of the classic **Producer-Consumer** pattern.
+
+In Module 10, we implemented a basic bounded buffer using the `synchronized` keyword, along with `wait()` and `notify()`. The `java.util.concurrent` package provides highly optimized, production-ready `BlockingQueue` implementations, which can be categorized into two primary types:
+
+### Bounded Queues
+*   **`ArrayBlockingQueue`**: A classic bounded blocking queue backed by a circular array.
+*   **`LinkedBlockingQueue`**: An optionally bounded blocking queue backed by linked nodes.
+*   **`LinkedBlockingDeque`**: A thread-safe, double-ended queue (deque) that supports insertion and removal from both ends.
+*   **`PriorityBlockingQueue`**: An unbounded blocking queue that uses the same ordering rules as `PriorityQueue` (using a heap structure).
+
+### Special-Purpose Queues
+*   **`SynchronousQueue`**: A zero-capacity queue where each insert operation must wait for a corresponding remove operation by another thread, and vice versa.
+*   **`DelayQueue`**: An unbounded blocking queue of delayed elements, in which an element can only be taken when its delay has expired.
+*   **`LinkedTransferQueue`**: An unbounded queue that combines features of `LinkedBlockingQueue` and `SynchronousQueue`, allowing producers to block until consumers receive elements.
+
+---
+
+## Implementing the Producer-Consumer Pattern
+
+The core methods that define blocking behavior in a `BlockingQueue` are:
+- **`put(E e)`**: Inserts the specified element into the queue, blocking the calling thread if the queue is full.
+- **`take()`**: Retrieves and removes the head of the queue, blocking the calling thread if the queue is empty.
+
+Here is a complete, working example demonstrating how easily a producer-consumer relationship can be established using `ArrayBlockingQueue`:
 
 ```java
 import java.util.Random;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 
-
 public class ArrayBlockingQueueDemo {
 
-
     public static void main(String[] args) {
+        // Create a bounded queue with a capacity of 5
         BlockingQueue<Integer> blockingQueue = new ArrayBlockingQueue<>(5);
+
         Thread producer = new Thread(() -> {
             new Random().ints().forEach(e -> {
                 try {
-                    System.out.println(Thread.currentThread() + " - Producing the element: " + e + ", Queue Size now: " + blockingQueue.size());
+                    System.out.println(Thread.currentThread().getName() + " - Producing element: " + e + ", Queue Size: " + blockingQueue.size());
                     blockingQueue.put(e);
                 } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
                     ex.printStackTrace();
                 }
             });
         }, "PRODUCER");
 
-
         Thread consumer = new Thread(() -> {
             while (true) {
                 try {
-                    System.out.println(Thread.currentThread() + " - Consuming the element: " + blockingQueue.take() + ", Queue Size now: " + blockingQueue.size());
+                    Integer element = blockingQueue.take();
+                    System.out.println(Thread.currentThread().getName() + " - Consuming element: " + element + ", Queue Size: " + blockingQueue.size());
                 } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     e.printStackTrace();
                 }
             }
         }, "CONSUMER");
-
 
         producer.start();
         consumer.start();
@@ -59,15 +80,18 @@ public class ArrayBlockingQueueDemo {
 }
 ```
 
-hosted with ❤ by 
+*Figure 16.1: ArrayBlockingQueue Demo*
 
-Illustration 16.1 ArrayBlockingQueue Demo
+### How it Works Under the Hood
+1.  **ArrayBlockingQueue**: In the demo above, we initialize the `ArrayBlockingQueue` with a fixed capacity of 5. It uses an array-based ring buffer (circular array) managed by a **put-index** and a **take-index**.
+2.  **Thread Blocking**:
+    - When the queue size reaches its maximum capacity (5), the `PRODUCER` thread calling `put()` is automatically blocked.
+    - When the queue size drops to 0, the `CONSUMER` thread calling `take()` is automatically blocked.
+3.  **No Manual Coordination**: We do not need to write complex thread coordination logic with `synchronized`, `wait()`, and `notify()`. The `BlockingQueue` implementation handles all state synchronization and thread blocking internally.
 
-With BlockingQueue classes provided in java.util.concurrent package, we don’t really have to struggle to write the producer-consumer patterns. All we need to do is create the BlockingQueue object, PRODUCER thread for producing elements, and CONSUMER thread for consuming elements. All the blocking or waiting is taken care of by BlockingQueue implementations.
+Here is a sample output snippet demonstrating this automatic flow control:
 
-**ArrayBlockingQueue****
-**In the above program(Illustration 16.1) we have created the ArrayBlockingQueue object which is bounded by size 5 — The Capacity. Then we have created two threads: PRODUCER that puts random numbers into the queue infinitely and CONSUMER that takes the elements and When the size of the queue reaches the capacity(in our case it is 5), the producer is blocked, and when the size is 0 the consumer is blocked. The ArrayBlockingQueue uses an array in a circular fashion, in simple words, it uses an array-based ring buffer with *put-index* and *take-index*. Here is the output snippet.
-
+```text
 Thread[CONSUMER,5,main] - Consuming the element: -1070351876, Queue Size now: 0
 Thread[PRODUCER,5,main] - Producing the element: 1824964048, Queue Size now: 1
 Thread[PRODUCER,5,main] - Producing the element: -1661194747, Queue Size now: 1
@@ -81,35 +105,55 @@ Thread[PRODUCER,5,main] - Producing the element: -305080951, Queue Size now: 4
 Thread[PRODUCER,5,main] - Producing the element: -338908732, Queue Size now: 5
 Thread[CONSUMER,5,main] - Consuming the element: 1425634979, Queue Size now: 4
 Thread[PRODUCER,5,main] - Producing the element: -563707394, Queue Size now: 5
+```
 
-**LinkedBlockingQueue**
-The LinkedBlockingQueue can also be used exactly the same way as ArrayBlockingQueue. It just uses the linked list behind the scenes. Replace line 8 in the above program with LinkedBlockingQueue and we will have the same behavior. If we don’t provide any size in the constructor, it will allow a maximum of Integer.MAX_VALUE nodes. The nodes will be created dynamically on each insertion.
+---
 
-**LinkedBlockingDeque****
-**The double-ended queue supports insertions and removals from both ends.
+## Exploring the Bounded Queue Implementations
 
-**ProrityBlockingQueue****
-**It uses the same ordering that is provided by PriorityQueue based on the heap data structure. Operations on this class make no guarantees about the ordering of elements with equal priority.
+Each bounded queue has unique characteristics that make it suitable for specific scenarios:
 
-I think most of the above queues are straightforward to understand, that put() blocks if the collection is full and take() blocks if the collection is empty.
+*   **`ArrayBlockingQueue`**: Backed by a single pre-allocated array. It has a low memory footprint because it does not create node objects dynamically, but it can suffer from write contention because it uses a single lock for both read and write operations.
+*   **`LinkedBlockingQueue`**: Backed by a linked list. It uses two separate locks—one for putting elements and one for taking elements—which allows a producer and a consumer to operate concurrently. However, it incurs additional garbage collection overhead due to the dynamic creation of node objects on every insertion. If initialized without a capacity, it defaults to `Integer.MAX_VALUE`.
+*   **`LinkedBlockingDeque`**: A double-ended version of the linked blocking queue. It allows threads to add or remove elements from both the head and the tail, making it useful for work-stealing patterns.
+*   **`PriorityBlockingQueue`**: An unbounded queue where elements are ordered according to their natural priority or a custom `Comparator`. Although it is conceptually a blocking queue, the `put()` operation never blocks because the queue grows dynamically. Only the `take()` operation blocks when the queue is empty.
 
-**The “**Condition"** Object:**
+---
 
-All these blocking queues use something known as Condition object to implement the blocking mechanism works similarly to wait & notify.
+## The "Condition" Object
 
-We have seen the wait-sets in  that every object has a single wait-set associated with it and is used by wait, notify, and notifyAll methods. WithCondition support added in java.util.concurrent.locks package, it allows us to have multiple wait-sets with a single lock object. A Condition object is bound to a Lock object. To obtain a Condition object for a particular  instance, we need to use its  method.
+Under the hood, all standard Java blocking queues rely on the **Condition** interface (`java.util.concurrent.locks.Condition`) to coordinate thread signaling.
 
-The Lock interface has a method newCondition() that returns us the new Condition object. This object provides us the means for one thread to suspend execution (await) until notified by another thread(signal) that some state condition may now be true. The key property that waiting for a condition provides is that it *atomically* releases the associated lock and suspends the current thread, just like Object.wait.
+In Module 10, we saw that every Java object has a single **wait-set** associated with its intrinsic monitor, which is controlled via `Object.wait()`, `Object.notify()`, and `Object.notifyAll()`. 
 
-The Condition object has two main methods:
+The **Condition** interface allows us to associate **multiple wait-sets** with a single explicit `Lock` object. This provides fine-grained, target-specific thread signaling.
 
-**await(): **Causes the current thread to wait until it is signaled or interrupted. The lock associated with this Condition is atomically released and the current thread becomes blocked for thread scheduling purposes and lies dormant until some other thread calls signal() on the same Condition object or the current thread is interrupted by other thread. This is just like a wait() method with synchronized.
+### Obtaining a Condition
+A `Condition` instance is bound to a specific `Lock`. We obtain it using the `newCondition()` method on a `Lock` instance:
 
-**signal():** notifies one waiting thread. As a result of this if any threads are waiting on this condition then one is selected for waking up. That thread will then re-acquire the lock and continue the stuff. The signalAll() method wakes up all the waiting threads waiting on this condition.
+```java
+Lock lock = new ReentrantLock();
+Condition notFull = lock.newCondition();
+Condition notEmpty = lock.newCondition();
+```
 
-Lock, await, and signal work just like synchronized, wait, and notify but with synchronized there is only one wait-set associated. With Lock we can create multiple Condition objects that have the waitsets.
+### Core Condition Methods
+*   **`await()`**: Suspends the calling thread. The lock associated with the `Condition` is **atomically released**, and the thread is placed into the wait-set for this specific condition. The thread remains dormant until another thread calls `signal()` or `signalAll()` on this condition, or if the thread is interrupted.
+*   **`signal()`**: Wakes up one thread waiting on this condition. The awakened thread must re-acquire the associated lock before returning from `await()`.
+*   **`signalAll()`**: Wakes up all threads waiting on this condition.
 
-With that background set, let's look at how BlockingQueue can be implemented with Lock and Condition. Have a look at the below code. We have implemented our own circular array based BlockingQueue.
+> **Insight: Multiple Condition Waitsets**
+> By creating two separate conditions—`notFull` and `notEmpty`—we can separate the wait-sets of producers and consumers.
+> - A producer thread waits on `notFull` (waiting for space to open up) and signals `notEmpty` when an item is added.
+> - A consumer thread waits on `notEmpty` (waiting for an item to arrive) and signals `notFull` when an item is removed.
+> 
+> If we only had a single wait-set (like with intrinsic monitors), a `notify()` call could wake up a producer when we wanted to wake up a consumer, leading to unnecessary thread context switches or thread starvation (unless using the heavier `notifyAll()`).
+
+---
+
+## Custom Bounded Queue Implementation
+
+Let's put this theory into practice. Below is a complete implementation of a custom circular-array-based `MyArrayBlockingQueue` using `ReentrantLock` and two `Condition` variables:
 
 ```java
 import java.util.Random;
@@ -117,9 +161,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
-
 public class MyArrayBlockingQueue<E> {
-
 
     private final int capacity;
     private final Lock lock;
@@ -127,50 +169,54 @@ public class MyArrayBlockingQueue<E> {
     private final Condition notFull;
     private final E[] items;
 
-
     private int putIndex;
     private int takeIndex;
     private int count;
 
-
+    @SuppressWarnings("unchecked")
     public MyArrayBlockingQueue(int capacity) {
         this.capacity = capacity;
-        items = (E[]) new Object[capacity];
-        lock = new ReentrantLock();
-        notEmpty = lock.newCondition();
-        notFull = lock.newCondition();
+        this.items = (E[]) new Object[capacity];
+        this.lock = new ReentrantLock();
+        this.notEmpty = lock.newCondition();
+        this.notFull = lock.newCondition();
     }
-
 
     public void put(E e) throws InterruptedException {
         lock.lock();
         try {
+            // Block while the queue is full
             while (count == capacity) {
                 notFull.await();
             }
             items[putIndex] = e;
             if (++putIndex == capacity) {
-                putIndex = 0;
+                putIndex = 0; // Wrap around circular array
             }
             count++;
+            
+            // Signal waiting consumers that the queue is no longer empty
             notEmpty.signal();
         } finally {
             lock.unlock();
         }
     }
 
-
     public E take() throws InterruptedException {
         lock.lock();
         try {
+            // Block while the queue is empty
             while (count == 0) {
                 notEmpty.await();
             }
             E e = items[takeIndex];
+            items[takeIndex] = null; // Help GC
             if (++takeIndex == capacity) {
-                takeIndex = 0;
+                takeIndex = 0; // Wrap around circular array
             }
             count--;
+            
+            // Signal waiting producers that the queue is no longer full
             notFull.signal();
             return e;
         } finally {
@@ -178,79 +224,60 @@ public class MyArrayBlockingQueue<E> {
         }
     }
 
-
     public static void main(String[] args) throws InterruptedException {
         int nElements = 20;
         MyArrayBlockingQueue<Integer> blockingQueue = new MyArrayBlockingQueue<>(5);
-
 
         Thread producer = new Thread(() -> {
             new Random().ints(nElements).forEach(e -> {
                 try {
                     blockingQueue.put(e);
-                    System.out.println(Thread.currentThread() + " - Produced the element: " + e);
+                    System.out.println(Thread.currentThread().getName() + " - Produced element: " + e);
                 } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
                     ex.printStackTrace();
                 }
             });
         }, "PRODUCER");
 
-
         Thread consumer = new Thread(() -> {
             int i = 0;
             while (i++ < nElements) {
                 try {
-                    System.out.println(Thread.currentThread() + " - Consuming the element: ");
                     Integer e = blockingQueue.take();
-                    System.out.println(Thread.currentThread() + " - Consumed the element: " + e);
+                    System.out.println(Thread.currentThread().getName() + " - Consumed element: " + e);
                 } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
                     e.printStackTrace();
                 }
             }
         }, "CONSUMER");
 
-
         producer.start();
         consumer.start();
 
-
-        // wait for producer and consumer thread to complete
         producer.join();
         consumer.join();
-
-
     }
 }
 ```
 
-hosted with ❤ by 
+*Figure 16.2: Custom ArrayBlockingQueue implementation using ReentrantLock and Conditions*
 
-Our own implementation of ArrayBlockingQueue with ReentrantLocks and Condition objects
+### Deep Dive into the Code
+1.  **Lock Acquisition**: Both `put()` and `take()` begin by acquiring the explicit lock (`lock.lock()`). This ensures that only one thread can modify the internal array, pointers, and counter at a time.
+2.  **Guarding State with Loops**: We check the conditions (`count == capacity` and `count == 0`) inside a `while` loop rather than an `if` block. This is a critical pattern because of **spurious wakeups** (where a thread wakes up without being signaled) or because another thread might have acquired the lock first and consumed the state change before the awakened thread could run.
+3.  **Explicit Signaling**:
+    - In `notFull.await()`, the producer suspends its execution and atomically releases the lock. When a consumer calls `take()`, it decrements the count and calls `notFull.signal()`, waking up the producer.
+    - In `notEmpty.await()`, the consumer suspends its execution. When the producer calls `put()`, it increments the count and calls `notEmpty.signal()`, waking up the consumer.
+4.  **Circular Array Logic**: The `putIndex` and `takeIndex` wrap around back to `0` when they reach the array capacity, allowing us to reuse the allocated array slots infinitely.
 
-You can see at lines 9–11, we have declared the Lock and Condition variables and in the constructor we have initialized these variables. We have taken two condition variables here to demonstrate that we can have two wait-sets PRODUCER thread in one wait-set andCONSUMER in the other. We could have one Condition object and push the PRODUCER and CONSUMER into the same wait-set. But this would defeat the purpose of using the Condition object. In this case, we could simply go for synchrnozed keyword with wait & notify. Taking two Condition objects is an optimization because we would like to keep waiting PRODUCER and CONSUMER threads in separate wait-sets so that we can notify a single thread at a time when items or spaces become available in the buffer.
-
-The names of the Condition variablesnotFull and notWait may be confusing for you. But we can understand if we put them in words:
-
-notFull.await(): We call this when the queue is full to say that, *“wait till the queue is not-full because the queue is now full*”.
-
-notEmpty.await(): We call this when the queue is empty to say that, *“wait till the queue is not-empty because the queue is now empty”.*
-
-That’s all about the Condition objects.
+---
 
 ## Summary
 
-A BlockingQueue is a type of shared collection that is used to exchange data between two or more threads
-
-As the name suggests BlockingQueue causes one or more of the threads to wait/block until the point in time when the data can be exchanged.
-
-The Typical use case of BlockingQueue is to implement the Producer-Consumer patterns with the *Bounded Buffers*.
-
-java.util.concurrent package provides several BlockingQueue implementations viz. ArrayBlocking, LinkedBlockingQueue, PriorityBlockingQueue, etc.
-
-All these blocking queues use something known as Condition object to implement the blocking mechanism works similarly to wait & notify.
-
-The Lock interface has a method newCondition() that returns us the new Condition object which provides means for one thread to suspend execution (await) until notified by another thread(signal) that some state condition may now be true.
-
-Same as Object.wait a condition objects await() method *atomically* releases the associated lock and suspends the current thread.
-
-signal() method notifies the waiting threads on the same Condition object.
+*   **BlockingQueue**: A concurrent collection designed to exchange data between threads. It automatically blocks producer threads when the queue is full and consumer threads when the queue is empty.
+*   **Standard Implementations**: The JDK offers several implementations including `ArrayBlockingQueue` (array-backed, bounded), `LinkedBlockingQueue` (node-backed, optionally bounded), and `PriorityBlockingQueue` (heap-backed, priority-sorted).
+*   **The Condition Object**: Part of the explicit Lock API (`java.util.concurrent.locks.Condition`), it provides a way to coordinate thread waiting and signaling.
+*   **Multiple Wait-Sets**: Unlike intrinsic monitors which support only one wait-set per object, explicit locks allow the creation of multiple `Condition` objects, enabling highly optimized, target-specific thread signaling (e.g., separating producer and consumer wait-sets).
+*   **Atomic Lock Release**: The `Condition.await()` method atomically releases the associated lock and suspends the thread, placing it in the wait-set. The thread must re-acquire the lock before returning from `await()`.

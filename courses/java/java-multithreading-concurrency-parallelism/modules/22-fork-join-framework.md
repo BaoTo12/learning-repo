@@ -1,194 +1,259 @@
 # Guide to the Fork/Join Framework in Java
 
-## 1. Overview
+Java 7 introduced the **Fork/Join Framework** to the `java.util.concurrent` package. The framework is designed to speed up parallel processing by attempting to utilize all available processor cores. It achieves this by implementing a highly efficient **divide-and-conquer** task execution model.
 
-Java 7 introduced the fork/join framework. It provides tools to help speed up parallel processing by attempting to use all available processor cores. It accomplishes this **through a divide and conquer approach.**
+---
 
-In practice, this means that **the framework first “forks,”** recursively breaking the task into smaller independent subtasks until they are simple enough to run asynchronously.
+## 1. The Divide-and-Conquer Approach
 
-After that, **the “join” part begins.** The results of all subtasks are recursively joined into a single result. In the case of a task that returns void, the program simply waits until every subtask runs.
+The Fork/Join Framework coordinates parallel execution through two distinct phases:
 
-To provide effective parallel execution, the fork/join framework uses a pool of threads called the *ForkJoinPool*. This pool manages worker threads of type *ForkJoinWorkerThread*.
+1.  **The Fork Phase**: A large task is recursively split (**forked**) into smaller, independent subtasks until they are simple enough to be executed sequentially without further division.
+2.  **The Join Phase**: The subtasks are executed in parallel, and their results are recursively merged (**joined**) back up the hierarchy into a single final result. If the task returns `void`, the framework simply waits until all subtasks have completed.
 
-## 2. ForkJoinPool
-
-The *ForkJoinPool* is the heart of the framework. It is an implementation of the  that manages worker threads and provides us with tools to get information about the thread pool state and performance.
-
-Worker threads can execute only one task at a time, but the *ForkJoinPool* doesn’t create a separate thread for every single subtask. Instead, each thread in the pool has its own double-ended queue (or , pronounced “deck”) that stores tasks.
-
-This architecture is vital for balancing the thread’s workload with the help of the** work-stealing algorithm.**
-
-## 2.1. Work-Stealing Algorithm
-
-## Simply put, free threads try to “steal” work from deques of busy threads.
-
-By default, a worker thread gets tasks from the head of its own deque. When it is empty, the thread takes a task from the tail of the deque of another busy thread or from the global entry queue since this is where the biggest pieces of work are likely to be located.
-
-This approach minimizes the possibility that threads will compete for tasks. It also reduces the number of times the thread will have to go looking for work, as it works on the biggest available chunks of work first.
-
-## 2.2. ForkJoinPool Instantiation
-
-In Java 8, the most convenient way to get access to the instance of the *ForkJoinPool *is to use its static method *()*. This will provide a reference to the common pool, which is a default thread pool for every *ForkJoinTask*.
-
-According to , using the predefined common pool reduces resource consumption since this discourages the creation of a separate thread pool per task.
-
-```java
-**ForkJoinPool** commonPool = ForkJoinPool.commonPool();
+```mermaid
+graph TD
+    A["Large Task"] -->|Fork| B["Subtask 1"]
+    A -->|Fork| C["Subtask 2"]
+    B -->|Fork| D["Subtask 1.1"]
+    B -->|Fork| E["Subtask 1.2"]
+    
+    D -->|Join| F["Result 1.1 + 1.2"]
+    E -->|Join| F
+    C -->|Sequential Run| G["Result 2"]
+    F -->|Join| H["Final Combined Result"]
+    G -->|Join| H
 ```
 
-We can achieve the same behavior in Java 7 by creating a *ForkJoinPool* and assigning it to a *public static* field of a utility class:
+*Figure 22.1: Flow of a recursive Fork/Join execution cycle*
+
+To execute these tasks efficiently, the framework manages a specialized thread pool called the **`ForkJoinPool`**, which runs worker threads of type **`ForkJoinWorkerThread`**.
+
+---
+
+## 2. ForkJoinPool and the Work-Stealing Engine
+
+The **`ForkJoinPool`** is the heart of the Fork/Join Framework. It is an implementation of the `ExecutorService` interface designed specifically to execute recursive tasks.
+
+In a standard thread pool, all threads share a single work queue. In a highly parallel environment, thousands of threads competing for a single queue creates a major lock bottleneck. 
+
+To solve this, `ForkJoinPool` implements a **Work-Stealing** architecture:
+- Each worker thread in the pool maintains its own private, double-ended queue (**Deque**) to store its subtasks.
+- **Local Execution (LIFO)**: By default, a worker thread pushes new subtasks onto the **head** of its own deque, and pops them from the **head** to execute them. This Last-In-First-Out ordering maximizes CPU cache locality.
+- **Work-Stealing (FIFO)**: If a worker thread finishes all tasks in its own deque, it becomes idle. To maximize CPU utilization, it attempts to "steal" a task from the **tail** of another busy worker's deque, or from the global submission queue.
+
+> **Mental Model: Work-Stealing in ForkJoinPool**
+> Stealing from the **tail** of another thread's deque provides two massive advantages:
+> 1.  **Contention Reduction**: The owner thread accesses the deque from the **head**, while the thief accesses it from the **tail**. Since they operate on opposite ends, they rarely block each other.
+> 2.  **Largest Chunk First**: Because tasks are split recursively, the largest chunks of undivided work are located at the tail of the deque (the oldest tasks). By stealing from the tail, the thief grabs a large chunk of work that it can then split locally, reducing the need to steal again.
+
+---
+
+## 3. Instantiating ForkJoinPool
+
+There are two ways to obtain or create a `ForkJoinPool` instance:
+
+### 1. The Common Pool (Recommended)
+In Java 8, you can access a static, pre-allocated **common pool** using `ForkJoinPool.commonPool()`:
 
 ```java
-**public** **static** **ForkJoinPool** forkJoinPool = **new** **ForkJoinPool**(2);
+ForkJoinPool commonPool = ForkJoinPool.commonPool();
 ```
 
-Now we can easily access it:
+The common pool is the default pool used by all parallel streams, `CompletableFuture`, and any `ForkJoinTask` that is not explicitly submitted to a custom pool. Utilizing the common pool is highly recommended because it reduces resource consumption, preventing the overhead of spawning separate thread pools for different tasks.
+
+### 2. Custom ForkJoinPool
+If you need custom thread naming, custom thread factories, or a specific parallelism level, you can construct a custom pool:
 
 ```java
-**ForkJoinPool** forkJoinPool = PoolUtil.forkJoinPool;
+// Create a custom pool with a parallelism level of 2 (uses 2 processor cores)
+ForkJoinPool forkJoinPool = new ForkJoinPool(2);
 ```
 
-With *ForkJoinPool’s *constructors, we can create a custom thread pool with a specific level of parallelism, thread factory and exception handler. Here the pool has a parallelism level of 2. This means that pool will use two processor cores.
+---
 
-## 3. ForkJoinTask<V>
+## 4. ForkJoinTask<V>
 
-*ForkJoinTask *is the base type for tasks executed inside *ForkJoinPool*. In practice, one of its two subclasses should be extended: the *RecursiveAction* for *void *tasks and the *RecursiveTask<V>* for tasks that return a value.* *They both have an abstract method *compute() *in which the task’s logic is defined.
+**`ForkJoinTask`** is the base class for all tasks executed within a `ForkJoinPool`. It is a lightweight representation of a task (much lighter than a standard thread). In practice, you should not extend `ForkJoinTask` directly; instead, you should extend one of its two primary subclasses:
 
-## 3.1. RecursiveAction
+*   **`RecursiveAction`**: Used for tasks that perform computations but do **not** return a result (their return type is `void`).
+*   **`RecursiveTask<V>`**: Used for tasks that perform computations and return a result of type `V`.
 
-In the example below, we use a *String* called *workload* to represent the unit of work to be processed. For demonstration purposes, the task is a nonsensical one: It simply uppercases its input and logs it.
+Both subclasses require you to implement the abstract **`compute()`** method, which contains the recursive divide-and-conquer logic.
 
-To demonstrate the forking behavior of the framework, **the example splits the task if *****workload.length()***** is larger than a specified threshold*** *using the *createSubtask()* method.
+---
 
-The String is recursively divided into substrings, creating *CustomRecursiveTask *instances that are based on these substrings.
+## 5. Implementing RecursiveAction (No Return Value)
 
-As a result, the method returns a List<CustomRecursiveAction>.
-
-The list is submitted to the *ForkJoinPool *using the *invokeAll()* method:
+Below is an implementation of a `CustomRecursiveAction` that converts a string to uppercase in parallel. If the string length exceeds a specified threshold, the task forks itself into two subtasks:
 
 ```java
-**public** **class** **CustomRecursiveAction** **extends** **RecursiveAction** {
-    **private** **String** workload = "";
-    **private** **static** **final** **int** THRESHOLD = 4;
-    **private** **static** **Logger** logger = 
-      Logger.getAnonymousLogger();
-    **public** **CustomRecursiveAction**(String workload) {
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ForkJoinTask;
+import java.util.concurrent.RecursiveAction;
+import java.util.logging.Logger;
+
+public class CustomRecursiveAction extends RecursiveAction {
+    private final String workload;
+    private static final int THRESHOLD = 4;
+    private static final Logger logger = Logger.getAnonymousLogger();
+
+    public CustomRecursiveAction(String workload) {
         this.workload = workload;
     }
+
     @Override
-    **protected** **void** **compute**() {
-        **if** (workload.length() > THRESHOLD) {
+    protected void compute() {
+        if (workload.length() > THRESHOLD) {
+            // Split the task into smaller subtasks and execute them in parallel
             ForkJoinTask.invokeAll(createSubtasks());
-        } **else** {
-           processing(workload);
+        } else {
+            // Perform the sequential computation
+            processing(workload);
         }
     }
-    **private** List<CustomRecursiveAction> **createSubtasks**() {
-        List<CustomRecursiveAction> subtasks = **new** **ArrayList**<>();
-        **String** partOne = workload.substring(0, workload.length() / 2);
-        **String** partTwo = workload.substring(workload.length() / 2, workload.length());
-        subtasks.add(**new** **CustomRecursiveAction**(partOne));
-        subtasks.add(**new** **CustomRecursiveAction**(partTwo));
-        **return** subtasks;
+
+    private List<CustomRecursiveAction> createSubtasks() {
+        List<CustomRecursiveAction> subtasks = new ArrayList<>();
+        String partOne = workload.substring(0, workload.length() / 2);
+        String partTwo = workload.substring(workload.length() / 2);
+        
+        subtasks.add(new CustomRecursiveAction(partOne));
+        subtasks.add(new CustomRecursiveAction(partTwo));
+        return subtasks;
     }
-    **private** **void** **processing**(String work) {
-        **String** result = work.toUpperCase();
-        logger.info("This result - (" + result + ") - was processed by " 
-          + Thread.currentThread().getName());
+
+    private void processing(String work) {
+        String result = work.toUpperCase();
+        logger.info("Result: (" + result + ") processed by " + Thread.currentThread().getName());
     }
 }
 ```
 
-We can use this pattern to develop our own *RecursiveAction* classes. To do this, we create an object that represents the total amount of work, chose a suitable threshold, define a method to divide the work and define a method to do the work.
+*Figure 22.2: Parallel String uppercase processing using RecursiveAction*
 
-## 3.2. RecursiveTask<V>
+---
 
-For tasks that return a value, the logic here is similar.
+## 6. Implementing RecursiveTask<V> (With Return Value)
 
-The difference is that the result for each subtask is united in a single result:
+Below is an implementation of a `CustomRecursiveTask` that processes an array of integers in parallel, filtering and transforming elements. It recursively divides the array until the size falls below the threshold, and then joins the results:
 
 ```java
-**public** **class** **CustomRecursiveTask** **extends** **RecursiveTask**<Integer> {
-    **private** **int**[] arr;
-    **private** **static** **final** **int** THRESHOLD = 20;
-    **public** **CustomRecursiveTask**(**int**[] arr) {
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.concurrent.ForkJoinTask;
+import java.util.concurrent.RecursiveTask;
+
+public class CustomRecursiveTask extends RecursiveTask<Integer> {
+    private final int[] arr;
+    private static final int THRESHOLD = 20;
+
+    public CustomRecursiveTask(int[] arr) {
         this.arr = arr;
     }
+
     @Override
-    **protected** Integer **compute**() {
-        **if** (arr.length > THRESHOLD) {
-            **return** ForkJoinTask.invokeAll(createSubtasks())
+    protected Integer compute() {
+        if (arr.length > THRESHOLD) {
+            // Fork subtasks and sum their results upon joining
+            return ForkJoinTask.invokeAll(createSubtasks())
               .stream()
               .mapToInt(ForkJoinTask::join)
               .sum();
-        } **else** {
-            **return** processing(arr);
+        } else {
+            // Perform the sequential computation
+            return processing(arr);
         }
     }
-    **private** Collection<CustomRecursiveTask> **createSubtasks**() {
-        List<CustomRecursiveTask> dividedTasks = **new** **ArrayList**<>();
-        dividedTasks.add(**new** **CustomRecursiveTask**(
-          Arrays.copyOfRange(arr, 0, arr.length / 2)));
-        dividedTasks.add(**new** **CustomRecursiveTask**(
-          Arrays.copyOfRange(arr, arr.length / 2, arr.length)));
-        **return** dividedTasks;
+
+    private Collection<CustomRecursiveTask> createSubtasks() {
+        List<CustomRecursiveTask> dividedTasks = new ArrayList<>();
+        dividedTasks.add(new CustomRecursiveTask(Arrays.copyOfRange(arr, 0, arr.length / 2)));
+        dividedTasks.add(new CustomRecursiveTask(Arrays.copyOfRange(arr, arr.length / 2, arr.length)));
+        return dividedTasks;
     }
-    **private** Integer **processing**(**int**[] arr) {
-        **return** Arrays.stream(arr)
-          .filter(a -> a >
-&& a < 27)
+
+    private Integer processing(int[] arr) {
+        // Filter elements between 10 and 27, multiply by 10, and sum
+        return Arrays.stream(arr)
+          .filter(a -> a > 10 && a < 27)
           .map(a -> a * 10)
           .sum();
     }
 }
 ```
 
-In this example, we use an array stored in the *arr *field of the *CustomRecursiveTask *class to represent the work. The *createSubtasks()* method recursively divides the task into smaller pieces of work until each piece is smaller than the threshold. Then the *invokeAll() *method submits the subtasks to the common pool and returns a list of .
+*Figure 22.3: Parallel integer array summation using RecursiveTask*
 
-To trigger execution, the *join()* method is called for each subtask.
+---
 
-We’ve accomplished this here using Java 8’s . We use the *sum()* method as a representation of combining sub results into the final result.
+## 7. Submitting Tasks to ForkJoinPool
 
-## 4. Submitting Tasks to the ForkJoinPool
+You can submit tasks to the `ForkJoinPool` using several methods depending on whether you need synchronous blocking, asynchronous execution, or automated joining:
 
-We can use a few approaches to submit tasks to the thread pool.
-
-Let’s start with the ***submit() ***or ***execute()**** *method (their use cases are the same):
+### 1. `execute(ForkJoinTask)` or `submit(ForkJoinTask)`
+Submits the task asynchronously. The submitting thread does not block. You must call `join()` on the task later to retrieve the result:
 
 ```java
 forkJoinPool.execute(customRecursiveTask);
-**int** result = customRecursiveTask.join();
+int result = customRecursiveTask.join(); // Blocks until completed
 ```
 
-The ***invoke()**** *method forks the task and waits for the result, and doesn’t need any manual joining:
+### 2. `invoke(ForkJoinTask)`
+Submits the task synchronously. The calling thread blocks until the task is fully executed and returns the result directly, eliminating the need for manual joining:
 
 ```java
-**int** result = forkJoinPool.invoke(customRecursiveTask);
+int result = forkJoinPool.invoke(customRecursiveTask);
 ```
 
-The ***invokeAll()*** method is the most convenient way to submit a sequence of *ForkJoinTasks* to the *ForkJoinPool*. It takes tasks as parameters (two tasks, var args or a collection), forks and then returns a collection of *Future* objects in the order in which they were produced.
-
-Alternatively, we can use separate ***fork() *****and *****join()*** methods. The *fork()* method submits a task to a pool, but it doesn’t trigger its execution. We must use the *join() *method for this purpose.
-
-In the case of *RecursiveAction*, the *join() *returns nothing but* null*; for *RecursiveTask<V>*, it returns the result of the task’s execution:
+### 3. `ForkJoinTask.fork()` and `ForkJoinTask.join()`
+You can manually coordinate tasks using the `fork()` and `join()` primitives:
+- **`fork()`**: Asynchronously submits the task to the pool's work queue. This is a non-blocking call.
+- **`join()`**: Blocks the calling thread until the task completes and returns the result.
 
 ```java
-customRecursiveTaskFirst.fork();
-result = customRecursiveTaskLast.join();
+// Asynchronously fork the first task
+task1.fork(); 
+// Execute task2 sequentially in the current thread and then join task1
+int result2 = task2.compute(); 
+int result1 = task1.join(); 
+int finalResult = result1 + result2;
 ```
 
-Here we used the *invokeAll() *method to submit a sequence of subtasks to the pool. We can do the same job with *fork()* and *join()*, though this has consequences for the ordering of the results.
+To avoid subtle ordering bugs and maximize parallelism, it is generally recommended to use **`ForkJoinTask.invokeAll(task1, task2)`** instead of manual fork-and-join sequences.
 
-To avoid confusion, it is generally a good idea to use *invokeAll()* method to submit more than one task to the *ForkJoinPool*.
+---
 
-## 5. Conclusion
+## Guidelines for Efficient Fork/Join Development
 
-Using the fork/join framework can speed up processing of large tasks, but to achieve this outcome, we should follow some guidelines:
+To achieve optimal performance and avoid concurrency bottlenecks, follow these four guidelines:
 
-**Use as few thread pools as possible. **In most cases, the best decision is to use one thread pool per application or system.
+1.  **Minimize Thread Pools**: In almost all cases, you should use **one** thread pool per application or JVM. Share the default `ForkJoinPool.commonPool()` across your application rather than constructing separate pools for different tasks.
+2.  **Use the Common Pool by Default**: Only create a custom `ForkJoinPool` if you explicitly need a custom thread factory, custom exception handler, or strict core isolation.
+3.  **Choose a Reasonable Threshold**: Choosing the right threshold for splitting tasks is critical:
+    - If the threshold is **too small**, the overhead of creating and scheduling millions of lightweight task objects will exceed the computation time, reducing performance.
+    - If the threshold is **too large**, the tasks will not be split enough to utilize all available CPU cores, resulting in poor parallelism.
+4.  **Avoid Blocking Operations inside Tasks**: 
+    > [!WARNING]
+    > **Blocking in ForkJoinTasks Pitfall**
+    > Never perform blocking I/O (like network or disk calls), lock acquisitions, or sleep operations inside a `ForkJoinTask`. 
+    > 
+    > Because `ForkJoinPool` worker threads run cooperatively, blocking a thread stalls the work-stealing engine and prevents other tasks in its queue from being stolen or executed, severely degrading pool throughput.
 
-**Use the default common thread pool** if no specific tuning is needed.
+---
 
-**Use a reasonable threshold** for splitting *ForkJoinTask* into subtasks.
+## Summary
 
-## Avoid any blocking in ForkJoinTasks.
+*   **Fork/Join Framework**: A parallel processing framework in Java designed to speed up large, computationally heavy tasks using a recursive divide-and-conquer approach.
+*   **Divide-and-Conquer**:
+    - **Fork**: Recursively splits a large task into smaller independent subtasks.
+    - **Join**: Merges the subtask results back into a single final result.
+*   **Work-Stealing Architecture**: Each worker thread has its own Deque. Threads pull tasks from the head of their own deque (LIFO). Idle threads steal tasks from the tail of busy threads' deques (FIFO), maximizing CPU utilization and reducing lock contention.
+*   **Task Types**:
+    - `RecursiveAction`: For parallel tasks that do not return a value (`void`).
+    - `RecursiveTask<V>`: For parallel tasks that return a result of type `V`.
+*   **Common Pool**: The JVM provides a pre-allocated `ForkJoinPool.commonPool()` shared by all parallel streams and CompletableFuture, reducing thread allocation overhead.
+*   **No Blocking**: Blocking operations (I/O, locks, sleep) must be avoided inside `ForkJoinTask` to prevent stalling the cooperative worker threads and the work-stealing engine.

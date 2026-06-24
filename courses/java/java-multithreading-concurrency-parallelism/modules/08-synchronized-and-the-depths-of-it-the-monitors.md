@@ -1,181 +1,134 @@
-# Synchronized and the depths of it — The monitors
+# Synchronized and the Depths of It — The Monitors
 
-_NOTE: Dear Readers, please follow the content till the end as I tried to explain the things at the bytecode level as this is the core of multithreading in Java. If this is understood most of the java multithreading will be a cake walk for the reader._
+In the previous module, we saw how to make a class thread-safe using the `synchronized` keyword. Now, we will gain an in-depth understanding of how synchronization works under the hood in the JVM.
 
-In  we have seen how we can make a class thread-safe using synchronized keyword. We will now have an in-depth understanding of it by looking at the bytecodes.
+---
 
-The first thing to understand is that when the synchronized method or block gets executed, a lock is acquired. We generally say the lock is acquired on a resource. But what is that resource? In Java, that resource is always an Object — A Java Object.
+## Intrinsic Locks (Monitors)
 
-*In many books and articles, this lock is called an *Intrinsic Lock*, because the lock is acquired intrinsically without specifying (that the lock needs to be acquired). In the JVM vocabulary, it is called as the *Monitor*. Every object in Java has a monitor associated with it. In other words every Object in Java has a lock associated with it.*
+When a synchronized method or block is executed, a **lock** must be acquired. In Java, this lock is always associated with a specific **Object**.
 
-So now the question again is on which object the lock is acquired? There are two answers to this question.
+> **Mental Model: Intrinsic Locks**
+> Every object in Java has a built-in lock associated with it. In Java vocabulary, this is called an **Intrinsic Lock** or **Monitor** (and sometimes a **Mutual Exclusion Lock** or **Mutex**). Gaining a lock on an object means a thread is taking exclusive ownership of that object's monitor.
 
-First, if we are using synchronized ***method***, the lock is always acquired on the object that is calling the synchronized method — this
-
-Second, if we are using synchronized ***block***, we have to specify the object on which the lock needs to be acquired.
-
-Now please allow me to specify one more statement which most books don’t specify. When we say the lock is acquired, what it exactly means is that the thread takes ownership of the monitor associated with it.
-
-*NOTE: In JVM Language, the lock is called as the *Monitor*. The most important thing is that Every object in Java has a *Monitor* associated with it. This monitor is also called as Mutual Exclusion Lock.*
-
-*Apart from the monitor, every object also has a waitset associated with it. We will look at waitsets in little more detail when we look at *wait, notify & notifyall*.*
-
-Here in our example, we specified synchronized(this) { ++value; } , so the lock will be acquired on the object calling the method. But we can also specify our own object on which the lock is to be acquired as below.
+On which object is the lock acquired?
+*   **Synchronized Methods:** The lock is acquired on the object instance that called the method (`this`).
+*   **Synchronized Blocks:** You must explicitly specify the object on which the lock is acquired (e.g., `synchronized(lockObj)`).
 
 ```java
-private final Object MY_OBJ = new Object();
+private final Object lockObj = new Object();
 
 public void increment() {
-    synchronized (MY_OBJ) {
+    synchronized (lockObj) { // Lock is acquired on lockObj
         ++value;
     }
 }
-With the above case, the lock is acquired on the object referred byMY_OBJ.
 ```
 
-Now, we will have a look at the bytecodes of both variants: the method and theblock.
+Every object also has a **waitset** associated with it, which is used for thread communication (which we will explore in detail when discussing `wait()`, `notify()`, and `notifyAll()`).
 
-**Bytecode snapshot when using **synchronized** method:**
+---
+
+## Bytecode Analysis: Synchronized Methods vs. Blocks
+
+Let's examine how the JVM handles these two different synchronization approaches at the bytecode level.
+
+### 1. Synchronized Methods
+Disassembling a class with a synchronized method:
+
+```text
+public synchronized void increment();
+  Code:
+     0: aload_0
+     1: dup
+     2: getfield      #2                  // Field value:I
+     5: iconst_1
+     6: iadd
+     7: putfield      #2                  // Field value:I
+    10: return
+```
+
+**Analysis:** The bytecode for a synchronized method is nearly identical to a non-synchronized method. The JVM handles synchronization implicitly using the `ACC_SYNCHRONIZED` flag in the method's access flags table. When a thread calls a method with this flag, it automatically acquires the monitor of the calling object before execution and releases it upon method return.
+
+### 2. Synchronized Blocks
+Disassembling a class with a synchronized block:
+
+```text
+public void increment();
+  Code:
+     0: aload_0
+     1: dup
+     2: astore_1
+     3: monitorenter                     // Gaining monitor ownership
+     4: aload_0
+     5: dup
+     6: getfield      #2                  // Field value:I
+     9: iconst_1
+    10: iadd
+    11: putfield      #2                  // Field value:I
+    14: aload_1
+    15: monitorexit                      // Releasing monitor ownership
+    16: goto          24
+    19: astore_2
+    20: aload_1
+    21: monitorexit                      // Releasing monitor if an exception occurs
+    22: aload_2
+    23: athrow
+    24: return
+```
+
+**Analysis:** Inside a synchronized block, the JVM uses two explicit bytecode instructions:
+*   **`monitorenter` (Line 3):** The thread attempts to gain ownership of the monitor of the object on the stack (in this case, `this` loaded at line 0).
+*   **`monitorexit` (Line 15 & 21):** The thread releases ownership of the monitor. Notice that the compiler generates *two* `monitorexit` instructions—one for the normal execution path and one in the exception handler block (lines 19–23) to ensure that the lock is guaranteed to be released even if the code throws an exception.
+
+> **Pitfall: NullPointerExceptions with monitorenter**
+> If the object reference passed to a synchronized block is `null` (e.g., `synchronized(nullObj)`), the `monitorenter` instruction will immediately throw a `NullPointerException`. Always ensure your lock references are initialized and marked `final`.
+
+---
+
+## Gaining Monitor Ownership
+
+When a thread executes a `monitorenter` instruction, three scenarios can play out:
+
+### 1. The Monitor is Free
+If no thread owns the monitor of the target object, the current thread becomes its owner and sets the monitor's entry count to `1`.
+
+### 2. The Monitor is Already Owned by Another Thread
+If another thread owns the monitor, the current thread is blocked and cannot proceed. It enters the **`BLOCKED`** state and is placed in the lock queue, waiting for the owner thread to release the monitor via `monitorexit`.
+
+### 3. The Monitor is Already Owned by the Current Thread
+If the current thread already owns the monitor, it is allowed to enter the block again. The monitor increments an internal **entry count** counter. 
+
+> **Mental Model: Lock Reentrancy**
+> Intrinsic locks in Java are **reentrant**. This means a thread cannot block itself if it tries to acquire a lock it already holds. The monitor keeps track of the lock ownership and increments the entry count. Every `monitorexit` decrements the count. The lock is only fully released back to other threads when the count reaches `0`.
+
+For example, a thread can repeatedly acquire the same monitor lock in nested blocks without blocking itself:
 
 ```java
-Warning: File ./Counter.class does not contain class Counter
-Compiled from "CounterDemo.java"
-class org.vit.threads.Counter {
-  org.vit.threads.Counter();
-    Code:
-       0: aload_
-1: invokespecial #
-// Method java/lang/Object."<init>":()V
-       4: return
+Object lock = new Object();
+synchronized (lock) {
+    System.out.println("First time acquiring it");
 
+    synchronized (lock) {
+        System.out.println("Entering again");
 
-  public synchronized void increment();
-    Code:
-       0: aload_
-1: dup
-       2: getfield      #
-// Field value:I
-       5: iconst_
-6: iadd
-       7: putfield      #
-// Field value:I
-      10: return
-
-
-  public int get();
-    Code:
-       0: aload_
-1: getfield      #
-// Field value:I
-       4: ireturn
+        synchronized (lock) {
+            System.out.println("And again");
+        }
+    }
 }
 ```
 
-hosted with ❤ by 
+Below is the conceptual flow of thread transitions around a monitor:
 
-There is not much difference between the synchronized version and the non-synchronized version of bytecodes except for the keyword synchronized got added to the method signature. Now let's look at the second version — the synchronized block.
-
-**Bytecode snapshot when using **synchronized** block:**
-
-```java
-class org.vit.threads.Counter {
-  org.vit.threads.Counter();
-    Code:
-       0: aload_
-1: invokespecial #
-// Method java/lang/Object."<init>":()V
-       4: return
-
-
-  public void increment();
-    Code:
-       0: aload_
-1: dup
-       2: astore_
-3: monitorenter
-       4: aload_
-5: dup
-       6: getfield      #
-// Field value:I
-       9: iconst_
-10: iadd
-      11: putfield      #
-// Field value:I
-      14: aload_
-15: monitorexit
-      16: goto
-19: astore_
-20: aload_
-21: monitorexit
-      22: aload_
-23: athrow
-      24: return
-    Exception table:
-       from    to  target type
-
-
-any
-
-
-any
-
-
-  public int get();
-    Code:
-       0: aload_
-1: getfield      #
-// Field value:I
-       4: ireturn
-}
-```
-
-hosted with ❤ by 
-
-Now observe the bytecodes of the increment method. There are two bytecodes that are of our interest.
-
-**monitorenter** at line 13
-
-**monitorexit**at line 21
-
-The thread that executes monitorenter gains ownership of the monitor associated with the *object *that is specified byobjectref in the operand stack. (That is why we have two aload_0 instructions on lines 10 and 14. The extra aload_0 instruction at line 14 is to load the object mentioned in synchronized block, which is this and put it on the operand stack so that the monitorenter instruction can find the objectref on which the lock needs to be acquired). And this objectref is nothing but this in our case.
-
-_The extra aload_0 instruction at line 14 is to load the object mentioned in synchronized block ( the this reference) and put it on the operand stack so that the monitorenter instruction can find the objectref on which the lock needs to be acquired._
-
-_NOTE: Acquiring the lock is nothing but gaining the ownership of the monitor associated with the object._
-
-There are three cases we need to understand on gaining ownership of the monitor.
-
-**Another thread already gained ownership of the monitor:** If another thread already owns the monitor associated with objectref, the current thread waits until the object is unlocked, then tries again to gain the ownership. The thread is blocked and waiting for a monitor lock to enter a synchronized block or method. The thread is said to be in BLOCKED state until it gets the ownership of the monitor.
-
-**Current thread already gained ownership of the monitor:** If the current thread already owns the monitor associated with objectref, it increments a counter in the monitor indicating the number of times this thread has entered the monitor. This feature is called the ***Reentrancy — The same thread reentering the monitor. ***So, the Intrinsic Lock is a reentrant Lock. We also have a class called ReentrantLock in java.util.concurrent.locks package that works the same way.
-
-**No thread owns the monitor:** If the monitor associated with objectref is not owned by any thread, the current thread becomes the owner of the monitor, setting the entry count of this monitor to 1.
-
-_If \***\*objectref\*\*** is null, \***\*monitorenter\*\*** throws a \***\*NullPointerException\*\***._
-
-The thread that executes monitorexit must be the owner of the monitor associated with the instance referenced by objectref. When the thread executes monitorexit it decrements the entry count of the monitor associated with objectref.
-
-If as a result, the value of the entry count is zero, the thread exits the monitor and is no longer its owner. Other threads that are blocking can now enter the monitor. Which thread can enter the monitor is in the hands of JVM now.
-
-If *objectref* is null, *monitorexit* throws a NullPointerException.
-
-If the thread that executes *monitorexit* is not the owner of the monitor associated with the instance referenced by *objectref*, *monitorexit* throws an IllegalMonitorStateException.
-
-One or more monitorexit instructions may be used with a monitorenter instruction to implement a synchronized block.
-
-The monitorenter and monitorexit instructions are not used in the implementation of synchronized methods, although they can be used to provide equivalent locking semantics. That’s why the bytecodes when using the synchronized method haven’t had much of a difference.
+*Figure 8.1: Thread Monitor Ownership*
 ![alt text](../images/image5.png)
 
-## Summary:
+---
 
-Every object in Java is a lock associated with it. This lock is also called an Intrinsic Lock or Monitor.
+## Summary
 
-Acquiring the lock means gaining ownership of the monitor.
-
-The thread entering into the synchronized block or synchronized method will try to gain ownership of the monitor of the object referred by objectref. For non-static synchronized methods this will always be the this object.
-
-The Monitor or Lock or Intrinsic Lock is reentrant in nature, which means, a thread can acquire the lock that it has already acquired and it maintains the count of how many times the lock has been acquired by a specific thread.
-
-The bytecode instructions betweenmonitorenter and monitorexit act as a guarded region (The critical section).
-
-The monitorenter and monitorexit instructions are NOT used in the implementation of synchronized methods.
+*   **Intrinsic Locks/Monitors:** Every object in Java has an associated monitor that threads must acquire to execute synchronized code.
+*   **Reentrancy:** Intrinsic locks are reentrant. A thread holding a lock can re-acquire it without blocking; the monitor maintains an acquisition count.
+*   **`monitorenter` & `monitorexit`:** These explicit bytecode instructions are generated for synchronized blocks. The compiler guarantees that `monitorexit` is called on all paths (including exceptional exits).
+*   **BLOCKED State:** A thread trying to enter a monitor owned by another thread enters the `BLOCKED` state until the owner exits the monitor.
