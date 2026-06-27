@@ -558,3 +558,5 @@ Analyze the requirements for each system below and choose the most appropriate t
 - **WebSockets** upgrade HTTP to a persistent, bidirectional, full-duplex TCP channel, optimizing two-way data streaming.
 - **WebRTC** targets peer-to-peer media streaming over UDP, bypassing the server but adding signaling complexity.
 - Select the transport protocol based on directionality, update frequency, and latency requirements.
+
+

@@ -6,19 +6,6 @@ In this module, we will explore advanced lock implementations that optimize thro
 
 ---
 
-## Differences Between Lock and Synchronized Block
-
-Using the explicit `Lock` API offers several distinct advantages over traditional `synchronized` blocks:
-
-| Feature | `synchronized` Block | Lock API (`ReentrantLock`, etc.) |
-| :--- | :--- | :--- |
-| **Lexical Scope** | Rigidly bound. Lock must be acquired and released in the same method block. | Flexible. Lock (`lock()`) and unlock (`unlock()`) can occur in separate methods. |
-| **Fairness Policy** | No fairness support. Any thread can barge and acquire the lock. | Supports fairness. Longest-waiting threads are guaranteed priority. |
-| **Non-blocking Try** | No. Threads block indefinitely if the lock is held. | Yes. `tryLock()` immediately returns `false` if the lock is unavailable. |
-| **Interruption Support** | No. Waiting threads cannot be interrupted. | Yes. `lockInterruptibly()` allows waiting threads to be interrupted. |
-
----
-
 > **Problem: Read Contention Bottlenecks**
 > In applications with high read-to-write ratios (e.g., in-memory caches, metadata registries), using exclusive locks causes severe thread contention. Even though multiple concurrent read operations do not modify state and are safe to run in parallel, an exclusive lock serializes them, degrading performance.
 
@@ -28,8 +15,8 @@ Using the explicit `Lock` API offers several distinct advantages over traditiona
 
 The **`ReadWriteLock`** interface maintains a pair of locks to distinguish between read-only and write operations:
 
-*   **Read Lock (Shared)**: Multiple threads can hold the read lock concurrently, as long as no thread holds the write lock.
-*   **Write Lock (Exclusive)**: Only a single thread can hold the write lock. While held, no other threads can read or write.
+- **Read Lock (Shared)**: Multiple threads can hold the read lock concurrently, as long as no thread holds the write lock.
+- **Write Lock (Exclusive)**: Only a single thread can hold the write lock. While held, no other threads can read or write.
 
 ```java
 public interface ReadWriteLock {
@@ -37,13 +24,6 @@ public interface ReadWriteLock {
     Lock writeLock();
 }
 ```
-
----
-
-> **Mental Model: Shared vs. Exclusive Access**
-> Think of a `ReadWriteLock` as having two gates:
-> *   **The Read Gate (Shared)**: Wide open for multiple threads to pass through simultaneously, provided no writer is active.
-> *   **The Write Gate (Exclusive)**: A narrow single-person turnstile. When a writer enters, both the read gate and the write gate are locked, blocking all other threads.
 
 ---
 
@@ -115,6 +95,7 @@ public class SynchronizedHashMapWithReadWriteLock {
 To demonstrate lock acquisition, thread collaboration, and the **fairness policy** in action, we can implement a multi-threaded simulation. In this scenario, we configure a `ReentrantReadWriteLock` with fairness enabled (`true`) to ensure that threads acquire locks in the order they requested them, preventing starvation.
 
 The simulation consists of three threads:
+
 1.  **`Read` Thread**: Continuously attempts to acquire the read lock. If a write lock is currently active, it detects this using `isWriteLocked()`. Once it acquires the read lock, it reads and prints the shared `message` string.
 2.  **`WriteA` Thread**: Periodically acquires the exclusive write lock to append the character `"a"` to the shared `message` string.
 3.  **`WriteB` Thread**: Periodically acquires the exclusive write lock to append the character `"b"` to the shared `message` string.
@@ -195,7 +176,6 @@ public class ReentrantReadWriteLockExample {
 > By passing `true` to the `ReentrantReadWriteLock` constructor, we enable a **fair lock** policy. This ensures that the lock favors the longest-waiting thread. In this simulation, as the reader and writer threads compete, the fair policy forces them to take turns in an ordered fashion rather than allowing one type of thread to continuously monopolize the lock.
 
 ---
-
 
 > **Pitfalls: Writer Starvation**
 > A significant risk with `ReentrantReadWriteLock` is **writer starvation**. If there is a continuous stream of read requests, the read lock remains constantly held. As a result, any thread waiting for the write lock will be blocked indefinitely, starving the writer.
@@ -281,6 +261,7 @@ public String readWithOptimisticLock(String key) {
 While `synchronized` blocks are limited to a single wait-set per object via `wait()` and `notify()`, the Lock API allows you to bind **multiple `Condition` instances** to a single `Lock`. This provides fine-grained control over thread communication.
 
 Consider a thread-safe Stack with a fixed capacity where we want to manage two distinct conditions:
+
 1.  **`stackEmptyCondition`**: Readers wait here if the stack is empty.
 2.  **`stackFullCondition`**: Writers wait here if the stack is full.
 
@@ -336,15 +317,15 @@ public class ReentrantLockWithCondition {
 }
 ```
 
-*(Note: The mechanics of Condition objects, signal routing, and custom BlockingQueue implementations are analyzed in-depth in Module 16).*
+_(Note: The mechanics of Condition objects, signal routing, and custom BlockingQueue implementations are analyzed in-depth in Module 16)._
 
 ---
 
 ## Summary
 
-*   **API Flexibility**: Explicit `Lock` implementations provide advanced features like non-blocking `tryLock()`, interruptible locking, and fairness policies that are unavailable with `synchronized`.
-*   **ReadWriteLock**: Optimizes read-heavy workloads by separating read access (shared) from write access (exclusive).
-*   **Writer Starvation**: A critical vulnerability in read-write locks under high read contention, which can block writer threads indefinitely.
-*   **StampedLock**: A high-performance synchronization primitive that introduces optimistic reading to eliminate read-locking overhead entirely in the absence of writes.
-*   **Non-Reentrancy Deadlock**: StampedLock is not reentrant; self-deadlock will occur if a thread attempts to acquire it multiple times.
-*   **Multiple Conditions**: Explicit locks support generating multiple `Condition` objects, allowing precise signal routing between different groups of waiting threads.
+- **API Flexibility**: Explicit `Lock` implementations provide advanced features like non-blocking `tryLock()`, interruptible locking, and fairness policies that are unavailable with `synchronized`.
+- **ReadWriteLock**: Optimizes read-heavy workloads by separating read access (shared) from write access (exclusive).
+- **Writer Starvation**: A critical vulnerability in read-write locks under high read contention, which can block writer threads indefinitely.
+- **StampedLock**: A high-performance synchronization primitive that introduces optimistic reading to eliminate read-locking overhead entirely in the absence of writes.
+- **Non-Reentrancy Deadlock**: StampedLock is not reentrant; self-deadlock will occur if a thread attempts to acquire it multiple times.
+- **Multiple Conditions**: Explicit locks support generating multiple `Condition` objects, allowing precise signal routing between different groups of waiting threads.
